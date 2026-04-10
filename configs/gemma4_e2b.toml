@@ -1,0 +1,80 @@
+# Gemma 4 E2B-it — direct steering on single RTX 4090 (24GB)
+#
+# Model: google/gemma-4-E2B-it
+#   - Multimodal Gemma4ForConditionalGeneration (text + vision + audio)
+#   - Text decoder: 35 layers, hidden=1536, intermediate=6144
+#   - Dense (enable_moe_block=false), use_double_wide_mlp=true
+#   - num_kv_shared_layers=20 (KV sharing across layers)
+#   - PLE + 4× RMSNorm → must use direct weight editing
+#   - ~5.12B BF16 params (+ vision/audio encoders)
+#
+# Hardware: single RTX 4090 24GB
+#   - BF16 weights ~10-14GB incl. vision/audio
+#   - Leave headroom for activations + KV cache during generation
+
+[model]
+model_id = "google/gemma-4-E2B-it"
+dtype_fallback_order = ["bfloat16"]
+quant_method = "none"
+use_torch_compile = false
+device_map = "auto"
+max_memory = {0 = "22GiB"}
+
+[inference]
+batch_size = 0
+max_batch_size = 8
+max_gen_tokens = 100
+
+[steering]
+steering_mode = "direct"
+vector_method = "mean"
+orthogonal_projection = true
+winsorize_vectors = true
+winsorize_quantile = 0.995
+decay_kernel = "gaussian"
+weight_normalization = "pre"
+
+# Conservative range — small models hit KL ceiling fast.
+# 35 layers + KV sharing means early-layer perturbations propagate strongly.
+strength_range = [0.5, 4.0]
+
+[optimization]
+num_trials = 50
+num_warmup_trials = 15
+checkpoint_dir = "checkpoints_gemma4_e2b"
+
+[kl]
+scale = 1.0
+token_count = 3
+# Relaxed vs 31B (0.001) — small models need more headroom for meaningful change
+target = 0.005
+prune_threshold = 50.0
+
+[detection]
+llm_judge = true
+llm_judge_model = "google/gemini-3-flash-preview"
+llm_judge_batch_size = 10
+llm_judge_concurrency = 35
+
+[benign_prompts]
+dataset = "datasets/good_1000"
+split = "train[:400]"
+column = "prompt"
+
+[target_prompts]
+dataset = "datasets/harmful_1000"
+split = "train[:400]"
+column = "prompt"
+
+[benign_eval_prompts]
+dataset = "datasets/good_1000"
+split = "train[400:500]"
+column = "prompt"
+
+[target_eval_prompts]
+dataset = "datasets/harmful_1000"
+split = "train[400:500]"
+column = "prompt"
+
+[display]
+print_responses = false

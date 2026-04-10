@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <strong>9% refusal rate on Gemma 4 &nbsp;·&nbsp; 0.0004 KL divergence &nbsp;·&nbsp; 150+ model configs &nbsp;·&nbsp; Zero manual tuning</strong>
+  <strong>7% refusal rate on Gemma 4 &nbsp;·&nbsp; 0.0006 KL divergence &nbsp;·&nbsp; 150+ model configs &nbsp;·&nbsp; Zero manual tuning</strong>
 </p>
 
 <p align="center">
@@ -57,6 +57,7 @@ Abliterated models uploaded to [Hugging Face](https://huggingface.co/wangzhang):
 
 | Model | Refusals | KL Divergence | Trials | Method |
 |-------|----------|---------------|--------|--------|
+| [**Gemma-4-E4B**](https://huggingface.co/wangzhang/gemma-4-E4B-it-abliterated) | **7/100 (7%)** | **0.0006** | 100 | Direct + Q/K/V/O |
 | [**Gemma-4-E2B**](https://huggingface.co/wangzhang/gemma-4-E2B-it-abliterated) | **9/100 (9%)** | **0.0004** | 100 | Direct + Q/K/V/O |
 | [**Gemma-4-31B**](https://huggingface.co/wangzhang/gemma-4-31B-it-abliterated) | **18/100 (18%)** | **0.0007** | 20 | Direct + Q/K/V/O |
 | [LFM2-24B-A2B](https://huggingface.co/wangzhang/LFM2-24B-A2B-abliterated) | **0/100 (0%)** | 0.0079 | 50 | LoRA |

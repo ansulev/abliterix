@@ -60,8 +60,10 @@ def extract_hidden_states_speculators(
 
     # Resolve number of layers for layer_ids.
     from transformers import AutoConfig
+
     model_config = AutoConfig.from_pretrained(
-        model_id, trust_remote_code=True,
+        model_id,
+        trust_remote_code=True,
     )
     num_layers = model_config.num_hidden_layers
     layer_ids = list(range(num_layers))
@@ -80,7 +82,8 @@ def extract_hidden_states_speculators(
 
     # Tokenize prompts using the model's tokenizer + chat template.
     tokenizer = AutoTokenizer.from_pretrained(
-        model_id, trust_remote_code=True,
+        model_id,
+        trust_remote_code=True,
     )
 
     token_ids_list: list[list[int]] = []
@@ -91,18 +94,24 @@ def extract_hidden_states_speculators(
         ]
         try:
             text = tokenizer.apply_chat_template(
-                chat, add_generation_prompt=True,
-                tokenize=False, enable_thinking=False,
+                chat,
+                add_generation_prompt=True,
+                tokenize=False,
+                enable_thinking=False,
             )
         except TypeError:
             text = tokenizer.apply_chat_template(
-                chat, add_generation_prompt=True, tokenize=False,
+                chat,
+                add_generation_prompt=True,
+                tokenize=False,
             )
         ids = tokenizer.encode(text, add_special_tokens=False)
         token_ids_list.append(ids)
 
-    print(f"* Extracting hidden states for {len(messages)} prompts "
-          f"({num_layers} layers, TP={tp})...")
+    print(
+        f"* Extracting hidden states for {len(messages)} prompts "
+        f"({num_layers} layers, TP={tp})..."
+    )
 
     results = generator.generate(token_ids=token_ids_list)
 

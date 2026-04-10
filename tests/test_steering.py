@@ -1,4 +1,4 @@
-"""Tests for prometheus.core.steering — decay kernels, dequant, interpolation, LoRA math.
+"""Tests for abliterix.core.steering — decay kernels, dequant, interpolation, LoRA math.
 
 All tests use synthetic tensors and reproduce the math from apply_steering()
 without loading a model.
@@ -60,7 +60,7 @@ def test_fp8_dequant_identity_scale():
     """With all-ones scale, output equals input.float()."""
     weight = torch.randn(256, 256)
     scale = torch.ones(2, 2)  # block_size=128 → ceil(256/128)=2
-    result = _dequantize_fp8_blockwise(weight, scale, block_size=128)
+    result = _dequantize_fp8_blockwise(weight, scale)
     assert torch.allclose(result, weight.float(), atol=1e-6)
 
 
@@ -68,7 +68,7 @@ def test_fp8_dequant_scaling():
     """Each block is multiplied by its corresponding scale."""
     weight = torch.ones(256, 256)
     scale = torch.tensor([[2.0, 3.0], [4.0, 5.0]])
-    result = _dequantize_fp8_blockwise(weight, scale, block_size=128)
+    result = _dequantize_fp8_blockwise(weight, scale)
     # Top-left 128x128 block → scale 2.0
     assert torch.allclose(result[:128, :128], torch.full((128, 128), 2.0))
     # Top-right 128x128 block → scale 3.0
@@ -83,7 +83,7 @@ def test_fp8_dequant_shape():
     weight = torch.randn(300, 400)
     # ceil(300/128)=3, ceil(400/128)=4
     scale = torch.ones(3, 4)
-    result = _dequantize_fp8_blockwise(weight, scale, block_size=128)
+    result = _dequantize_fp8_blockwise(weight, scale)
     assert result.shape == (300, 400)
 
 

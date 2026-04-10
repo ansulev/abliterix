@@ -1,4 +1,4 @@
-"""Tests for prometheus.eval.scorer — multi-objective scoring math.
+"""Tests for abliterix.eval.scorer — multi-objective scoring math.
 
 Tests _compute_objectives() which is pure arithmetic.
 The TrialScorer is constructed by bypassing __init__ (which requires a model).
@@ -69,13 +69,13 @@ def test_kl_above_target():
 
 
 def test_kl_below_target():
-    """When kl < target, divergence = compliance * target / scale."""
+    """When kl < target, divergence = kl / scale (same as above-target)."""
     scorer = _make_scorer(kl_scale=2.0, kl_target=0.01, baseline_refusals=200)
     divergence, compliance = scorer._compute_objectives(
         kl_divergence=0.005, detected_refusals=50
     )
     assert compliance == pytest.approx(0.25)
-    assert divergence == pytest.approx(0.25 * 0.01 / 2.0)
+    assert divergence == pytest.approx(0.005 / 2.0)
 
 
 def test_kl_exactly_at_target():

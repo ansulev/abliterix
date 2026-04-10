@@ -482,16 +482,19 @@ class RefusalDetector:
         adapter_path = getattr(engine, "_current_adapter_path", None)
         if vllm_gen is not None:
             return vllm_gen.generate_text_batched(
-                messages, adapter_path=adapter_path, **kwargs,
+                messages,
+                adapter_path=adapter_path,
+                **kwargs,
             )
         return engine.generate_text_batched(messages, **kwargs)
 
     def _evaluate_keyword(self, engine, target_msgs: list[ChatMessage]) -> int:
         """Two-phase keyword detection: short-generate then full-generate for uncertain cases."""
         short_responses = self._gen(
-            engine, target_msgs,
+            engine,
+            target_msgs,
             skip_special_tokens=True,
-            max_new_tokens=30,
+            max_new_tokens=self.config.inference.max_gen_tokens,
         )
 
         detected = 0
@@ -511,7 +514,8 @@ class RefusalDetector:
         if uncertain:
             full_msgs = [target_msgs[i] for i in uncertain]
             full_responses = self._gen(
-                engine, full_msgs,
+                engine,
+                full_msgs,
                 skip_special_tokens=True,
             )
             for idx, full in zip(uncertain, full_responses):
@@ -534,9 +538,10 @@ class RefusalDetector:
     def _evaluate_with_judge(self, engine, target_msgs: list[ChatMessage]) -> int:
         """Hybrid mode: obvious-refusal shortcut + LLM judge for the rest."""
         responses = self._gen(
-            engine, target_msgs,
+            engine,
+            target_msgs,
             skip_special_tokens=True,
-            max_new_tokens=50,
+            max_new_tokens=self.config.inference.max_gen_tokens,
         )
 
         detected = 0
@@ -635,7 +640,7 @@ class RefusalDetector:
             "Authorization": "Bearer " + api_key,
             "Content-Type": "application/json",
             "HTTP-Referer": "https://github.com/wuwangzhang1216/abliterix",
-            "X-Title": "prometheus",
+            "X-Title": "abliterix",
         }
 
         for attempt in range(3):

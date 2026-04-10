@@ -50,7 +50,9 @@ def _extract_candidate_directions(
 
     for layer_idx in range(n_layers):
         for g, (bc, tc) in enumerate(zip(b_chunks, t_chunks)):
-            direction = tc[:, layer_idx, :].mean(dim=0) - bc[:, layer_idx, :].mean(dim=0)
+            direction = tc[:, layer_idx, :].mean(dim=0) - bc[:, layer_idx, :].mean(
+                dim=0
+            )
             direction = F.normalize(direction.float(), p=2, dim=0)
             candidates.append(direction)
             indices.append((layer_idx, g))
@@ -135,14 +137,16 @@ def select_cosmic_direction(
         Indices of the most discriminative layers (bottom_pct by cosine similarity).
     """
     n_layers = benign_states.shape[1]
-    hidden_dim = benign_states.shape[2]
+    benign_states.shape[2]
 
     # Step 1: Identify evaluation layers (lowest cosine similarity = strongest refusal encoding).
     cos_sim = _compute_layer_discriminability(benign_states, target_states)
     n_eval = max(1, int(n_layers * bottom_pct))
     eval_layer_indices = torch.topk(cos_sim, n_eval, largest=False).indices.tolist()
 
-    print(f"* COSMIC: {n_eval} evaluation layers selected (indices: {eval_layer_indices})")
+    print(
+        f"* COSMIC: {n_eval} evaluation layers selected (indices: {eval_layer_indices})"
+    )
 
     # Step 2: Extract candidate directions.
     candidates, indices = _extract_candidate_directions(benign_states, target_states)

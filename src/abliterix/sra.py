@@ -70,8 +70,10 @@ def _build_concept_atoms(
         # Pad with zeros if fewer components than requested.
         if k < n_atoms:
             pad = torch.zeros(
-                n_atoms - k, atoms.shape[1],
-                device=atoms.device, dtype=atoms.dtype,
+                n_atoms - k,
+                atoms.shape[1],
+                device=atoms.device,
+                dtype=atoms.dtype,
             )
             atoms = torch.cat([atoms, pad], dim=0)
 
@@ -119,12 +121,12 @@ def _spectral_residualize(
         Cleaned refusal vector, shape ``(layers+1, hidden_dim)``.
     """
     n_layers = refusal_vector.shape[0]
-    n_atoms = concept_atoms.shape[0]
+    concept_atoms.shape[0]
     cleaned = []
 
     for layer_idx in range(n_layers):
-        v = refusal_vector[layer_idx].float()        # (hidden_dim,)
-        C = concept_atoms[:, layer_idx, :].float()    # (n_atoms, hidden_dim)
+        v = refusal_vector[layer_idx].float()  # (hidden_dim,)
+        C = concept_atoms[:, layer_idx, :].float()  # (n_atoms, hidden_dim)
 
         # Skip layers where concept atoms are degenerate.
         atom_norms = C.norm(dim=1)
@@ -138,7 +140,7 @@ def _spectral_residualize(
         # Ridge-regularised projection: v_proj = C^T (C C^T + α I)^{-1} C v
         CCT = C @ C.T  # (k, k)
         eye = torch.eye(CCT.shape[0], device=v.device, dtype=v.dtype)
-        Cv = C @ v     # (k,)
+        Cv = C @ v  # (k,)
         coeffs = torch.linalg.solve(CCT + ridge_alpha * eye, Cv)  # (k,)
         v_proj = C.T @ coeffs  # (hidden_dim,)
 
@@ -211,7 +213,9 @@ def compute_sra_vectors(
     concept_atoms = _build_concept_atoms(benign_states, n_atoms=n_atoms)
 
     # Step 3: Residualise the refusal vector against concept atoms.
-    cleaned = _spectral_residualize(base_vectors, concept_atoms, ridge_alpha=ridge_alpha)
+    cleaned = _spectral_residualize(
+        base_vectors, concept_atoms, ridge_alpha=ridge_alpha
+    )
 
     # Step 4: Normalise.
     return F.normalize(cleaned, p=2, dim=1)

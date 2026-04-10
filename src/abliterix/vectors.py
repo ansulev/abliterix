@@ -60,7 +60,7 @@ def _compute_ot_transform(
         Unit-normalised direction vectors, shape ``(layers+1, hidden_dim)``.
     """
     n_layers = benign_states.shape[1]
-    d = benign_states.shape[2]
+    benign_states.shape[2]
     per_layer = []
 
     for layer_idx in range(n_layers):
@@ -105,9 +105,8 @@ def _compute_ot_transform(
         # Lift direction back to full space: the steering direction is the
         # mean shift plus a covariance-alignment correction.
         covariance_correction = (
-            (A_reduced - torch.eye(n_components, device=b.device, dtype=b.dtype))
-            @ P
-        )  # (k, d)
+            A_reduced - torch.eye(n_components, device=b.device, dtype=b.dtype)
+        ) @ P  # (k, d)
         # The overall direction in full space.
         direction = diff + covariance_correction.mean(dim=0)
         per_layer.append(direction)
@@ -232,7 +231,8 @@ def compute_steering_vectors(
         from .cosmic import select_cosmic_direction
 
         vectors, _target_layers = select_cosmic_direction(
-            benign_states, target_states,
+            benign_states,
+            target_states,
         )
         # COSMIC already returns normalised vectors; skip to projection.
         if projected_abliteration:

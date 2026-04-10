@@ -177,7 +177,9 @@ def run_search(
                 )
             print("* Building LoRA adapter for vLLM...")
             lora_weights = proj_cache.build_lora_weights(
-                profiles, vector_index, config,
+                profiles,
+                vector_index,
+                config,
             )
             if lora_weights:
                 adapter_path = vllm_gen.save_adapter(

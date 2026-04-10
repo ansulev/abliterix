@@ -94,10 +94,12 @@ def train_concept_scorers(
 
         # Build dataset: benign = 0, target = 1.
         X = torch.cat([b, t], dim=0)
-        y = torch.cat([
-            torch.zeros(b.shape[0], 1, device=device),
-            torch.ones(t.shape[0], 1, device=device),
-        ])
+        y = torch.cat(
+            [
+                torch.zeros(b.shape[0], 1, device=device),
+                torch.ones(t.shape[0], 1, device=device),
+            ]
+        )
 
         scorer = ConceptScorer(hidden_dim, hidden_dim_scorer).to(device)
         optimizer = torch.optim.Adam(scorer.parameters(), lr=lr)

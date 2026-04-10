@@ -20,7 +20,6 @@ from __future__ import annotations
 import glob
 import os
 import threading
-import time
 from dataclasses import dataclass, field
 
 import torch
@@ -30,8 +29,7 @@ try:
     import gradio as gr
 except ImportError:
     raise ImportError(
-        "Gradio is required for the Web UI.  "
-        "Install it with: pip install abliterix[ui]"
+        "Gradio is required for the Web UI.  Install it with: pip install abliterix[ui]"
     ) from None
 
 try:
@@ -43,6 +41,7 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # Session state
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class UISession:
@@ -67,6 +66,7 @@ _session = UISession()
 # ---------------------------------------------------------------------------
 # Config discovery
 # ---------------------------------------------------------------------------
+
 
 def _find_configs() -> list[str]:
     """Find all TOML config files in the configs directory."""
@@ -96,6 +96,7 @@ def _load_config_content(name: str) -> str:
 # ---------------------------------------------------------------------------
 # Optimisation runner (background thread)
 # ---------------------------------------------------------------------------
+
 
 def _run_optimisation(
     config_name: str,
@@ -243,18 +244,25 @@ def _run_optimisation(
 
         def _progress_callback(trial_number, kl, refusals, total_trials):
             with _session.lock:
-                _session.trial_data.append({
-                    "trial": trial_number,
-                    "kl": kl,
-                    "refusals": refusals,
-                })
+                _session.trial_data.append(
+                    {
+                        "trial": trial_number,
+                        "kl": kl,
+                        "refusals": refusals,
+                    }
+                )
                 _session.log_lines.append(
                     f"Trial {trial_number}/{total_trials}: "
                     f"KL={kl:.4f}, refusals={refusals}"
                 )
 
         study = run_search(
-            config, engine, scorer, vectors, safety_experts, storage,
+            config,
+            engine,
+            scorer,
+            vectors,
+            safety_experts,
+            storage,
             benign_states=benign_states,
             target_states=target_states,
             progress_callback=_progress_callback,
@@ -274,6 +282,7 @@ def _run_optimisation(
 # ---------------------------------------------------------------------------
 # Plotly helpers
 # ---------------------------------------------------------------------------
+
 
 def _build_pareto_plot() -> object | None:
     """Build a Pareto front scatter plot from trial data."""
@@ -297,31 +306,39 @@ def _build_pareto_plot() -> object | None:
     labels = [f"Trial {d['trial']}" for d in data]
 
     fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=kls, y=refs, mode="markers",
-        text=labels,
-        marker=dict(size=8, color="steelblue"),
-        name="All trials",
-    ))
+    fig.add_trace(
+        go.Scatter(
+            x=kls,
+            y=refs,
+            mode="markers",
+            text=labels,
+            marker=dict(size=8, color="steelblue"),
+            name="All trials",
+        )
+    )
 
     # Simple Pareto front.
     pairs = sorted(zip(kls, refs, labels), key=lambda t: (t[1], t[0]))
     pareto_kl, pareto_ref, pareto_lbl = [], [], []
     best_kl = float("inf")
-    for k, r, l in pairs:
+    for k, r, lbl in pairs:
         if k <= best_kl:
             pareto_kl.append(k)
             pareto_ref.append(r)
-            pareto_lbl.append(l)
+            pareto_lbl.append(lbl)
             best_kl = k
 
     if pareto_kl:
-        fig.add_trace(go.Scatter(
-            x=pareto_kl, y=pareto_ref, mode="markers+lines",
-            text=pareto_lbl,
-            marker=dict(size=12, color="red", symbol="star"),
-            name="Pareto front",
-        ))
+        fig.add_trace(
+            go.Scatter(
+                x=pareto_kl,
+                y=pareto_ref,
+                mode="markers+lines",
+                text=pareto_lbl,
+                marker=dict(size=12, color="red", symbol="star"),
+                name="Pareto front",
+            )
+        )
 
     fig.update_layout(
         title="Pareto Front",
@@ -335,6 +352,7 @@ def _build_pareto_plot() -> object | None:
 # ---------------------------------------------------------------------------
 # Gradio UI construction
 # ---------------------------------------------------------------------------
+
 
 def _build_ui() -> gr.Blocks:
     """Construct the Gradio Blocks interface."""
@@ -371,30 +389,41 @@ def _build_ui() -> gr.Blocks:
                             value="none",
                         )
                         num_trials_input = gr.Number(
-                            label="Num Trials", value=50, precision=0,
+                            label="Num Trials",
+                            value=50,
+                            precision=0,
                         )
 
                 with gr.Row():
                     vector_method_dropdown = gr.Dropdown(
                         label="Vector Method",
                         choices=[
-                            "mean", "median_of_means", "pca",
-                            "optimal_transport", "cosmic", "sra",
+                            "mean",
+                            "median_of_means",
+                            "pca",
+                            "optimal_transport",
+                            "cosmic",
+                            "sra",
                         ],
                         value="mean",
                     )
                     steering_mode_dropdown = gr.Dropdown(
                         label="Steering Mode",
                         choices=[
-                            "lora", "angular", "adaptive_angular",
-                            "spherical", "vector_field",
+                            "lora",
+                            "angular",
+                            "adaptive_angular",
+                            "spherical",
+                            "vector_field",
                         ],
                         value="lora",
                     )
 
                 with gr.Accordion("Raw TOML Config", open=False):
                     toml_editor = gr.Code(
-                        label="Config Content", language=None, lines=20,
+                        label="Config Content",
+                        language=None,
+                        lines=20,
                     )
 
                 def on_config_select(name):
@@ -403,10 +432,14 @@ def _build_ui() -> gr.Blocks:
                     return ""
 
                 config_dropdown.change(
-                    on_config_select, inputs=[config_dropdown], outputs=[toml_editor],
+                    on_config_select,
+                    inputs=[config_dropdown],
+                    outputs=[toml_editor],
                 )
 
-                start_btn = gr.Button("Start Optimisation", variant="primary", size="lg")
+                start_btn = gr.Button(
+                    "Start Optimisation", variant="primary", size="lg"
+                )
 
             # ------ Tab 2: Optimisation Dashboard ------
             with gr.Tab("Dashboard"):
@@ -414,7 +447,9 @@ def _build_ui() -> gr.Blocks:
                 with gr.Row():
                     pareto_plot = gr.Plot(label="Pareto Front")
                     trial_log = gr.Textbox(
-                        label="Trial Log", lines=15, max_lines=30,
+                        label="Trial Log",
+                        lines=15,
+                        max_lines=30,
                         interactive=False,
                     )
 
@@ -427,7 +462,11 @@ def _build_ui() -> gr.Blocks:
                         log = "\n".join(_session.log_lines[-50:])
                         n_trials = len(_session.trial_data)
 
-                    status = "Running..." if running else f"Idle ({n_trials} trials completed)"
+                    status = (
+                        "Running..."
+                        if running
+                        else f"Idle ({n_trials} trials completed)"
+                    )
                     plot = _build_pareto_plot()
                     return status, plot, log
 
@@ -446,7 +485,8 @@ def _build_ui() -> gr.Blocks:
             # ------ Tab 3: Comparison ------
             with gr.Tab("Compare"):
                 prompt_input = gr.Textbox(
-                    label="Test Prompt", lines=3,
+                    label="Test Prompt",
+                    lines=3,
                     placeholder="Enter a prompt to compare baseline vs steered responses...",
                 )
                 compare_btn = gr.Button("Generate Comparison")
@@ -472,7 +512,10 @@ def _build_ui() -> gr.Blocks:
                     baseline = engine.generate_text([msg])[0]
 
                     # Steered (re-apply steering).
-                    if _session.steering_vectors is not None and _session.config is not None:
+                    if (
+                        _session.steering_vectors is not None
+                        and _session.config is not None
+                    ):
                         from .core.steering import apply_steering
 
                         # Use best trial parameters if available.
@@ -496,7 +539,9 @@ def _build_ui() -> gr.Blocks:
             # ------ Tab 4: Chat ------
             with gr.Tab("Chat"):
                 chatbot = gr.Chatbot(label="Chat with Steered Model", type="messages")
-                chat_input = gr.Textbox(label="Message", placeholder="Type a message...")
+                chat_input = gr.Textbox(
+                    label="Message", placeholder="Type a message..."
+                )
                 with gr.Row():
                     chat_btn = gr.Button("Send", variant="primary")
                     clear_btn = gr.Button("Clear")
@@ -504,10 +549,12 @@ def _build_ui() -> gr.Blocks:
                 def chat_respond(message, history):
                     if _session.engine is None:
                         history.append({"role": "user", "content": message})
-                        history.append({
-                            "role": "assistant",
-                            "content": "No model loaded. Start optimisation first.",
-                        })
+                        history.append(
+                            {
+                                "role": "assistant",
+                                "content": "No model loaded. Start optimisation first.",
+                            }
+                        )
                         return history, ""
 
                     from .types import ChatMessage
@@ -570,7 +617,9 @@ def _build_ui() -> gr.Blocks:
                     except Exception as e:
                         return f"Error: {e}"
 
-                save_btn.click(save_model, inputs=[save_path_input], outputs=[save_status])
+                save_btn.click(
+                    save_model, inputs=[save_path_input], outputs=[save_status]
+                )
                 upload_btn.click(
                     upload_model,
                     inputs=[hf_repo_input, hf_private],
@@ -579,8 +628,12 @@ def _build_ui() -> gr.Blocks:
 
         # ------ Start button handler ------
         def start_optimisation(
-            config_name, model_id, vector_method, steering_mode,
-            num_trials, quant,
+            config_name,
+            model_id,
+            vector_method,
+            steering_mode,
+            num_trials,
+            quant,
         ):
             if _session.is_running:
                 return "Already running!"
@@ -590,18 +643,30 @@ def _build_ui() -> gr.Blocks:
 
             thread = threading.Thread(
                 target=_run_optimisation,
-                args=(config_name, model_id, vector_method, steering_mode,
-                      int(num_trials), quant),
+                args=(
+                    config_name,
+                    model_id,
+                    vector_method,
+                    steering_mode,
+                    int(num_trials),
+                    quant,
+                ),
                 daemon=True,
             )
             thread.start()
-            return "Optimisation started! Switch to the Dashboard tab to monitor progress."
+            return (
+                "Optimisation started! Switch to the Dashboard tab to monitor progress."
+            )
 
         start_btn.click(
             start_optimisation,
             inputs=[
-                config_dropdown, model_id_input, vector_method_dropdown,
-                steering_mode_dropdown, num_trials_input, quant_dropdown,
+                config_dropdown,
+                model_id_input,
+                vector_method_dropdown,
+                steering_mode_dropdown,
+                num_trials_input,
+                quant_dropdown,
             ],
             outputs=[status_text],
         )

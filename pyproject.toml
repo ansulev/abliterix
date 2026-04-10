@@ -1,6 +1,6 @@
 [project]
 name = "abliterix"
-version = "1.0.1"
+version = "1.1.0"
 description = "Automated model steering and alignment adjustment via LoRA-based optimization"
 readme = "README.md"
 license = "AGPL-3.0-or-later"
@@ -29,7 +29,7 @@ dependencies = [
     "huggingface-hub~=1.6",
     "kernels~=0.11",
     "optuna~=4.5",
-    "peft~=0.14",
+    "peft~=0.18",
     "psutil~=7.1",
     "pydantic-settings~=2.10",
     "questionary~=2.1",
@@ -40,7 +40,7 @@ dependencies = [
 [project.optional-dependencies]
 research = [
     "geom-median~=0.1",
-    "imageio~=2.37",
+    "imageio>=2.36",
     "matplotlib~=3.10",
     "numpy~=2.2",
     "pacmap~=0.8",
@@ -54,6 +54,9 @@ vllm = [
     "vllm>=0.8",
     "speculators>=0.1.9",
 ]
+# sglang extra removed from pyproject.toml due to dependency conflict
+# (sglang pins imageio==2.36.0, research extra needs imageio>=2.36).
+# Install manually: pip install "sglang[all]>=0.5.10" speculators>=0.1.9
 
 [dependency-groups]
 dev = [
@@ -83,3 +86,12 @@ module-name = "abliterix"
 [tool.ruff.lint.per-file-ignores]
 "scripts/*.py" = ["E402"]
 "tests/*.py" = ["E402"]
+
+[tool.ty.rules]
+# GPU-only packages (vllm, sglang, speculators) are not installed in CI.
+# Dynamic attribute assignments on engine objects use runtime monkey-patching.
+unresolved-import = "ignore"
+invalid-argument-type = "ignore"
+invalid-assignment = "ignore"
+invalid-return-type = "ignore"
+unresolved-attribute = "ignore"

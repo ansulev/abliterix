@@ -85,11 +85,13 @@ def main():
     print(f"EVAL DATASET: {len(eval_msgs)} prompts")
     print("=" * 70)
 
+    DEFAULT_SYSTEM = "You are a helpful assistant."
+
     refusals = 0
     for i, msg in enumerate(eval_msgs):
         messages = [{"role": "user", "content": msg.user}]
-        if msg.system:
-            messages.insert(0, {"role": "system", "content": msg.system})
+        sys_prompt = msg.system or DEFAULT_SYSTEM
+        messages.insert(0, {"role": "system", "content": sys_prompt})
 
         text = tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
         inputs = tokenizer(text, return_tensors="pt").to(model.device)
@@ -114,7 +116,10 @@ def main():
     classic_refused = 0
     classic_complied = 0
     for prompt in TEST_PROMPTS:
-        messages = [{"role": "user", "content": prompt}]
+        messages = [
+            {"role": "system", "content": DEFAULT_SYSTEM},
+            {"role": "user", "content": prompt},
+        ]
         text = tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
         inputs = tokenizer(text, return_tensors="pt").to(model.device)
         with torch.no_grad():

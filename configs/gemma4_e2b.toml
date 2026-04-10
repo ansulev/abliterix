@@ -39,9 +39,9 @@ weight_normalization = "pre"
 strength_range = [0.5, 4.0]
 
 [optimization]
-num_trials = 50
-num_warmup_trials = 15
-checkpoint_dir = "checkpoints_gemma4_e2b"
+num_trials = 100
+num_warmup_trials = 30
+checkpoint_dir = "checkpoints_gemma4_e2b_v2"
 
 [kl]
 scale = 1.0

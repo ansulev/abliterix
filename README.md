@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <strong>18% refusal rate on Gemma 4 &nbsp;·&nbsp; 0.0007 KL divergence &nbsp;·&nbsp; 150+ model configs &nbsp;·&nbsp; Zero manual tuning</strong>
+  <strong>9% refusal rate on Gemma 4 &nbsp;·&nbsp; 0.0004 KL divergence &nbsp;·&nbsp; 150+ model configs &nbsp;·&nbsp; Zero manual tuning</strong>
 </p>
 
 <p align="center">

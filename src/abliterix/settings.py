@@ -317,7 +317,7 @@ class SteeringConfig(BaseModel):
         default_factory=list,
         description=(
             "Components to exclude from the search entirely. Names match the "
-            'keys returned by ``engine.list_steerable_components()`` (e.g. '
+            "keys returned by ``engine.list_steerable_components()`` (e.g. "
             '``"attn.q_proj"``). Useful for high-dimensional MoE models where '
             "attention-side steering wastes trial budget that should go to "
             "expert-path components."

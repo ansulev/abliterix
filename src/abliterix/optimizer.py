@@ -97,10 +97,19 @@ def run_search(
         profiles: dict[str, SteeringProfile] = {}
 
         for component in engine.list_steerable_components():
+            # User can exclude components from the search entirely (e.g. drop
+            # Q/K/V on MoE models where the refusal signal lives in expert path).
+            if component in config.steering.disabled_components:
+                continue
+            # Per-component override (e.g. MoE models want different
+            # ranges for attn vs fused expert mlp.down_proj).
+            comp_range = config.steering.component_strength_ranges.get(
+                component, config.steering.strength_range
+            )
             max_w = trial.suggest_float(
                 f"{component}.max_weight",
-                config.steering.strength_range[0],
-                config.steering.strength_range[1],
+                comp_range[0],
+                comp_range[1],
             )
             pos_lo = 0.4 * last_layer if last_layer < 20 else 0.6 * last_layer
             peak_pos = trial.suggest_float(
@@ -109,8 +118,14 @@ def run_search(
                 1.0 * last_layer,
             )
             # min_weight expressed as a fraction of max_weight
-            # (multivariate TPE needs fixed-range parameters).
-            min_frac = trial.suggest_float(f"{component}.min_weight", 0.0, 1.0)
+            # (multivariate TPE needs fixed-range parameters). The upper bound
+            # may be capped per-component (see component_min_frac_max) or
+            # globally (min_weight_frac_max) to bias warmup toward "sharp
+            # peak" profiles instead of nearly-flat over-steered ones.
+            frac_hi = config.steering.component_min_frac_max.get(
+                component, config.steering.min_weight_frac_max
+            )
+            min_frac = trial.suggest_float(f"{component}.min_weight", 0.0, frac_hi)
             falloff = trial.suggest_float(
                 f"{component}.min_weight_distance",
                 1.0,

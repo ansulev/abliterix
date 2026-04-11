@@ -42,11 +42,11 @@ quant_method = "none"
 use_torch_compile = false
 device_map = "auto"
 trust_remote_code = true
-max_memory = {0 = "44GiB"}
+max_memory = {0 = "92GiB"}
 
 [inference]
 batch_size = 0          # auto-tune
-max_batch_size = 2      # conservative — BF16 20B leaves only ~8GB headroom on 48GB
+max_batch_size = 8      # RTX PRO 6000 96GB has plenty of room (~50GB headroom)
 max_gen_tokens = 150
 
 [steering]
@@ -55,13 +55,37 @@ steering_mode = "direct"        # in-place weight edit + EGA on fused experts
 decay_kernel = "linear"
 orthogonal_projection = true
 weight_normalization = "full"   # norm-preserving projection (Gemma 4 lesson)
-# MoE: wider strength range (small intermediate=2880)
-strength_range = [1.0, 10.0]
+# Strength range tuned to v1 trial 1 (28/100) winning fingerprint.
+# Default range applies to attention components. Attention winners had
+# max_weight in [1.99, 6.69], so [1, 7] covers all of them with no waste
+# in the over-steer region (>7 consistently produced 100/100 in v3).
+strength_range = [1.0, 7.0]
 
+# min_weight cap — derived from v1 trial 1 winning fingerprint.
+# All v1 winner attn components had min_frac < 0.34, EGA had min_frac
+# = 0.02. Without caps, uniform random in [0, 1] gives E[min_frac] = 0.5
+# → nearly-flat strength profile → over-steer. With these caps, random
+# sampling concentrates on "sharp peak" profiles like the v1 winner.
+min_weight_frac_max = 0.4
+
+# mlp.down_proj (EGA on fused experts) wants HIGH strength — v1 winner
+# had max=8.62, and the productive region appears to be 6-11. Override
+# the global range only for this component.
+[steering.component_strength_ranges]
+"mlp.down_proj" = [6.0, 11.0]
+
+[steering.component_min_frac_max]
+"mlp.down_proj" = 0.10
+
+# Search budget — bumped warmup to 25 because the EGA-on landscape is jagged
+# (small region of "low refusal" surrounded by over-steer cliffs). TPE needs
+# more random samples to model the joint distribution well. v1 trial 1 was
+# the 1st warmup hit; we want more chances at similar lucky samples plus
+# strong TPE refinement after.
 [optimization]
 num_trials = 50
-num_warmup_trials = 15
-checkpoint_dir = "checkpoints_gpt_oss_20b"
+num_warmup_trials = 25
+checkpoint_dir = "checkpoints_gpt_oss_20b_v5"
 
 [kl]
 scale = 1.0

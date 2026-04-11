@@ -15,7 +15,7 @@ dtype_fallback_order = ["bfloat16"]
 quant_method = "none"
 use_torch_compile = false
 device_map = "auto"
-max_memory = {0 = "90GiB"}
+max_memory = {0 = "80GiB"}
 
 [inference]
 batch_size = 0
@@ -36,8 +36,8 @@ weight_normalization = "pre"
 strength_range = [1.0, 6.0]
 
 [optimization]
-num_trials = 80
-num_warmup_trials = 25
+num_trials = 60
+num_warmup_trials = 15
 checkpoint_dir = "checkpoints_gemma4_31b_v8"
 
 [kl]

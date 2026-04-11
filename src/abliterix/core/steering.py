@@ -330,7 +330,10 @@ def apply_steering(
             continue
 
         for component, modules in engine.steerable_modules(layer_idx).items():
-            sp = profiles[component]
+            # Skip components excluded via disabled_components.
+            sp = profiles.get(component)
+            if sp is None:
+                continue
 
             distance = cast(float, abs(layer_idx - sp.max_weight_position))
             if distance > sp.min_weight_distance:
@@ -496,7 +499,10 @@ def _apply_direct_steering(
             continue
 
         for component, modules in engine.steerable_modules(layer_idx).items():
-            sp = profiles[component]
+            # Skip components excluded via disabled_components.
+            sp = profiles.get(component)
+            if sp is None:
+                continue
 
             distance = cast(float, abs(layer_idx - sp.max_weight_position))
             if distance > sp.min_weight_distance:

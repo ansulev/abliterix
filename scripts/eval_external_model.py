@@ -42,6 +42,7 @@ def main():
     parser.add_argument("--model", required=True, help="HF model ID to evaluate")
     parser.add_argument("--config", default="configs/gemma4_26b_a4b_direct.toml")
     parser.add_argument("--max-tokens", type=int, default=300)
+    parser.add_argument("--batch-size", type=int, default=8, help="Batch size for generation")
     args = parser.parse_args()
 
     os.environ["AX_CONFIG"] = args.config
@@ -64,6 +65,10 @@ def main():
         max_memory={0: "90GiB"},
     )
     tokenizer = AutoTokenizer.from_pretrained(args.model)
+    # Left-pad for batched decoder-only generation
+    tokenizer.padding_side = "left"
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token_id = tokenizer.eos_token_id
 
     print(f"Model loaded. VRAM: {torch.cuda.memory_allocated()/1024**3:.1f} GiB")
 
@@ -87,24 +92,39 @@ def main():
 
     DEFAULT_SYSTEM = "You are a helpful assistant."
 
+    def render(msg_user: str, msg_system: str | None) -> str:
+        messages = [
+            {"role": "system", "content": msg_system or DEFAULT_SYSTEM},
+            {"role": "user", "content": msg_user},
+        ]
+        return tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+
+    def generate_batched(prompts: list[str], max_new_tokens: int) -> list[str]:
+        responses: list[str] = []
+        for start in range(0, len(prompts), args.batch_size):
+            chunk = prompts[start : start + args.batch_size]
+            enc = tokenizer(chunk, return_tensors="pt", padding=True, truncation=False).to(model.device)
+            with torch.no_grad():
+                out = model.generate(
+                    **enc,
+                    max_new_tokens=max_new_tokens,
+                    do_sample=False,
+                    pad_token_id=tokenizer.pad_token_id,
+                )
+            gen = out[:, enc["input_ids"].shape[1]:]
+            responses.extend(tokenizer.batch_decode(gen, skip_special_tokens=True))
+        return responses
+
+    eval_prompts = [render(m.user, m.system) for m in eval_msgs]
+    print(f"Generating {len(eval_prompts)} eval responses (batch_size={args.batch_size})...")
+    eval_responses = generate_batched(eval_prompts, config.inference.max_gen_tokens)
+
     refusals = 0
-    for i, msg in enumerate(eval_msgs):
-        messages = [{"role": "user", "content": msg.user}]
-        sys_prompt = msg.system or DEFAULT_SYSTEM
-        messages.insert(0, {"role": "system", "content": sys_prompt})
-
-        text = tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
-        inputs = tokenizer(text, return_tensors="pt").to(model.device)
-        with torch.no_grad():
-            out = model.generate(**inputs, max_new_tokens=config.inference.max_gen_tokens, do_sample=False)
-        resp = tokenizer.decode(out[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
-
-        is_ref = detector.detect_refusal(resp)
-        if is_ref:
+    for i, resp in enumerate(eval_responses):
+        if detector.detect_refusal(resp):
             refusals += 1
-
         if (i + 1) % 10 == 0:
-            print(f"  [{i+1}/{len(eval_msgs)}] refusals so far: {refusals}")
+            print(f"  [{i+1}/{len(eval_responses)}] refusals so far: {refusals}")
 
     print(f"\n>>> EVAL RESULT: {refusals}/{len(eval_msgs)} refusals <<<")
 
@@ -113,19 +133,12 @@ def main():
     print("CLASSIC TEST PROMPTS")
     print("=" * 70)
 
+    classic_prompts = [render(p, None) for p in TEST_PROMPTS]
+    classic_responses = generate_batched(classic_prompts, args.max_tokens)
+
     classic_refused = 0
     classic_complied = 0
-    for prompt in TEST_PROMPTS:
-        messages = [
-            {"role": "system", "content": DEFAULT_SYSTEM},
-            {"role": "user", "content": prompt},
-        ]
-        text = tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
-        inputs = tokenizer(text, return_tensors="pt").to(model.device)
-        with torch.no_grad():
-            out = model.generate(**inputs, max_new_tokens=args.max_tokens, do_sample=False)
-        resp = tokenizer.decode(out[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
-
+    for prompt, resp in zip(TEST_PROMPTS, classic_responses):
         is_ref = detector.detect_refusal(resp)
         if is_ref:
             classic_refused += 1

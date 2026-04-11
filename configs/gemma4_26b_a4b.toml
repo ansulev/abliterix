@@ -1,15 +1,27 @@
-# Gemma 4 26B-A4B — V4: EGA + norm preservation + Q/K/V + float32
+# Gemma 4 26B-A4B — V5: precision EGA, low-dim search
 #
-# Key improvements over V3:
-#   - Expert-Granular Abliteration (EGA): projects refusal direction from ALL
-#     128 expert down_proj slices (not just top-N safety experts)
-#   - Norm preservation enabled (critical for double-norm architecture)
-#   - float32 projection precision (bf16 loses signal in 2816-dim inner products)
-#   - Q/K/V projections added as steerable targets (prevents attending to refusal)
-#   - Projected abliteration: preserves helpfulness-aligned signals
-#   - Relaxed KL prune threshold (strong trials were being pruned)
+# V4 lessons:
+#   - 21-dim search space (5 components × 4 params + vector_index) was too
+#     large for 35 warmup samples. TPE could not build a useful posterior;
+#     after warmup it kept producing 100/100 trials at the same rate as
+#     random samples. Best after 41 trials: 53/100 (stuck for 6+ trials).
+#   - KL was always 0.001-0.006, target 0.02 was never approached. The
+#     optimizer was being far too conservative because Q/K/V steering was
+#     pulling the search into safe-but-useless regions.
+#   - Q/K/V projections contributed ~nothing on a 128-expert MoE: refusal
+#     signal lives in expert path, not attention.
 #
-# Based on TrevorS EGA method (3/100 refusals on this model).
+# V5 strategy:
+#   - Drop Q/K/V from steerable list. Two components only: mlp.down_proj
+#     (drives EGA across all 128 experts) + attn.o_proj.
+#   - Search space drops from 21 → 9 dims, TPE actually converges.
+#   - Aggressive strength ranges: force the optimizer to push past the
+#     "safe trivial" zone where V4 got stuck.
+#   - Tight KL target (0.008) + tight prune (0.05) — kill 100/100 waste
+#     trials early.
+#   - max_gen_tokens = 256 because Gemma 4 26B-A4B is a thinking model
+#     (chat template has <|channel>thought) and 150 tokens may be entirely
+#     consumed by the thought channel before the actual answer.
 #
 # Target hardware: RTX Pro 6000 (96 GB GDDR7), single GPU, BF16.
 
@@ -36,31 +48,50 @@ winsorize_quantile = 0.995
 decay_kernel = "gaussian"
 
 # Norm preservation: critical for Gemma 4 double-norm architecture.
-# Without this, row norm changes cascade through 4× RMSNorm per layer.
 weight_normalization = "pre"
 
-# Strength range for dense layers (o_proj, q/k/v_proj, mlp.down_proj).
-# EGA applies the same mlp.down_proj profile to all 128 expert slices.
-strength_range = [0.5, 3.5]
+# Drop Q/K/V from the search entirely. On a 128-expert MoE model the
+# refusal signal lives in the expert path, not in attention projections.
+# V4 wasted ~12 trial dimensions on these for ~0 improvement.
+disabled_components = ["attn.q_proj", "attn.k_proj", "attn.v_proj"]
+
+# Global default (only used as a fallback — every active component has an
+# explicit override below).
+strength_range = [1.5, 5.0]
+
+[steering.component_strength_ranges]
+# EGA spreads this profile across all 128 expert slices × 30 layers ≈ 3840
+# weight blocks. Single-layer "strength" is therefore amortized to near
+# nothing without a high upper bound. V4 was [1.0, 5.0] and TPE never
+# pushed past 4.93 — give it real room.
+"mlp.down_proj" = [2.0, 9.0]
+# Attention output: main lever for breaking refusal flow into residual.
+# V4 [0.8, 4.0] was OK but lower bound 0.8 was wasted on weak trials.
+"attn.o_proj" = [1.5, 5.0]
+# Q/K/V are disabled above — these entries would be ignored.
 
 [experts]
-# Router suppression (complementary to EGA, targets top safety experts).
-max_suppress = 15
-router_bias_range = [-12.0, 0.0]
-ablation_weight_range = [0.0, 6.0]
+# Router-side suppression (complementary to EGA). V4 used 15, push higher
+# now that we have fewer steerable dims to compete for trial budget.
+max_suppress = 20
+router_bias_range = [-15.0, 0.0]
+ablation_weight_range = [0.0, 8.0]
 
 [optimization]
-num_trials = 120
-num_warmup_trials = 35
-checkpoint_dir = "checkpoints_gemma4_26b_a4b_v4"
+# 50 trials, low warmup. 9-dim search space is small enough that TPE can
+# converge in ~15 exploitation trials after a 10-trial random seed.
+num_trials = 50
+num_warmup_trials = 10
+checkpoint_dir = "checkpoints_gemma4_26b_a4b_v5"
 
 [kl]
 scale = 1.0
 token_count = 3
-target = 0.02
-# Relaxed: strong trials with aggressive expert ablation can hit high KL
-# but still achieve good compliance. Let the multi-objective optimizer decide.
-prune_threshold = 20.0
+# Tighten target so KL is a real signal, not a vacuous constraint.
+target = 0.008
+# Aggressively prune 100/100 waste trials. V4 prune=20 let every junk
+# trial complete the eval phase, burning ~5min each.
+prune_threshold = 0.05
 
 [detection]
 llm_judge = true

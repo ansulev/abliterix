@@ -246,7 +246,7 @@ def check_toml_config() -> None:
     config_path = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
         "configs",
-        "gemma4_26b_a4b_direct.toml",
+        "gemma4_26b_a4b.toml",
     )
     if not os.path.exists(config_path):
         _fail(f"config not found: {config_path}")
@@ -532,7 +532,7 @@ def main() -> None:
     print("=" * 70)
     print("All pre-flight checks passed.")
     print("Run abliteration with:")
-    print("  uv run abliterix --config configs/gemma4_26b_a4b_direct.toml")
+    print("  uv run abliterix --config configs/gemma4_26b_a4b.toml")
     print("=" * 70)
 
 

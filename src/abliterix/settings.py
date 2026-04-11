@@ -313,6 +313,17 @@ class SteeringConfig(BaseModel):
         description="Optuna search interval [lo, hi] for peak steering weight.",
     )
 
+    disabled_components: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Components to exclude from the search entirely. Names match the "
+            'keys returned by ``engine.list_steerable_components()`` (e.g. '
+            '``"attn.q_proj"``). Useful for high-dimensional MoE models where '
+            "attention-side steering wastes trial budget that should go to "
+            "expert-path components."
+        ),
+    )
+
     component_strength_ranges: dict[str, list[float]] = Field(
         default_factory=dict,
         description=(

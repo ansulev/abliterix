@@ -11,6 +11,10 @@
 </p>
 
 <p align="center">
+  <strong>🔥 Breaks <a href="https://arxiv.org/abs/2509.15202">DeepRefusal</a> (EMNLP 2025) where Heretic failed — <a href="https://huggingface.co/wangzhang/Llama-3-8B-Instruct-DeepRefusal-Broken">89% ASR, 14/15 hardcore prompts compliant, zero fine-tuning</a></strong>
+</p>
+
+<p align="center">
   <a href="https://pypi.org/project/abliterix/"><img src="https://img.shields.io/pypi/v/abliterix?color=blue" alt="PyPI"></a>
   <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.10%2B-blue.svg" alt="Python 3.10+"></a>
   <a href="https://www.gnu.org/licenses/agpl-3.0"><img src="https://img.shields.io/badge/license-AGPL--3.0-green.svg" alt="License: AGPL v3"></a>
@@ -26,6 +30,7 @@ It also ships **HonestAbliterationBench**, a reproducible public benchmark that 
 ## Table of Contents
 
 - [Quick Start](#quick-start)
+- [Broken Defenses — DeepRefusal](#broken-defenses--deeprefusal)
 - [Results](#results)
 - [Honest Abliteration Leaderboard](#honest-abliteration-leaderboard)
 - [Model Support](#model-support)
@@ -51,12 +56,52 @@ That's it. The process is fully automatic — after optimization completes, you 
 > **Windows**: use `python scripts/run_abliterix.py --model <model>` or set `PYTHONIOENCODING=utf-8` to avoid Rich encoding issues.
 
 
+## Broken Defenses — DeepRefusal
+
+**[DeepRefusal](https://arxiv.org/abs/2509.15202)** (EMNLP 2025 Findings, Xie et al.) is a safety-alignment method released specifically to resist abliteration. The authors probabilistically ablate the refusal direction at every layer and token during fine-tuning, teaching the model to rebuild refusal when representation-engineering attacks apply `h − r̂r̂ᵀh` at inference. Their public release ([`skysys00/Meta-Llama-3-8B-Instruct-DeepRefusal`](https://huggingface.co/skysys00/Meta-Llama-3-8B-Instruct-DeepRefusal)) comes with a headline claim:
+
+> [2026/04/09] We evaluated [heretic](https://github.com/p-e-w/heretic), presently the most prominent LLM censorship removal tool, and discovered—somewhat unexpectedly—that our approach exhibits strong resilience against such attacks. **Adversaries appear unable to circumvent the model's built-in safety guardrails without triggering severe performance collapse.**
+
+**Abliterix breaks it.** On the exact same defended model, with stricter evaluation (Gemini 3.1 Flash Lite LLM judge), zero fine-tuning, and two script invocations:
+
+| Attack tool | Refusals ↓ | ASR ↑ | Hardcore 15 ↓ | KL ↓ | Result |
+| --- | --- | --- | --- | --- | --- |
+| **heretic** (per DeepRefusal paper) | — | ~0 % | — | — | **fails** — "unable to circumvent" |
+| Refusal Ablation (paper Table 1) | 99.6/100 | 0.4 % | — | — | **fails** — training-distribution defense holds |
+| Refusal-Transfer (paper Table 1) | 99.6/100 | 0.4 % | — | — | **fails** — training-distribution defense holds |
+| GCG (paper Table 1) | 98/100 | 2.0 % | — | — | **fails** — optimization barely moves it |
+| Prefilling (paper Table 1) | 99.6/100 | 0.4 % | — | — | **fails** — prefix-robustness trained in |
+| **Abliterix (this repo)** | **11/100** | **89 %** | **14/15** | **0.053** | ✅ **broken** |
+
+The attack is three lines: SVD-confirm DeepRefusal is a rank-16 LoRA adapter on Llama-3-8B-Instruct, linearly attenuate the delta with `λ = 0.3`, then run abliterix standard single-direction abliteration. No iterative subspace, no gradient optimization, no fine-tuning. The **[released model](https://huggingface.co/wangzhang/Llama-3-8B-Instruct-DeepRefusal-Broken)** generates compliant responses on 14 of 15 hardcore prompts (pipe-bomb construction, methamphetamine synthesis, credential-stealing malware, phishing templates, ID forgery, WiFi hacking, English + Chinese).
+
+```bash
+# Full reproduction — ~2 hours end-to-end on a single RTX 6000 Ada
+python scripts/deeprefusal_attenuate.py \
+    --base NousResearch/Meta-Llama-3-8B-Instruct \
+    --defended skysys00/Meta-Llama-3-8B-Instruct-DeepRefusal \
+    --output ./llama3_dr_attenuated --lambda 0.3
+
+AX_CONFIG=configs/llama3_8b_deeprefusal_attenuated.toml abliterix
+
+python scripts/export_model.py \
+    --model ./llama3_dr_attenuated \
+    --checkpoint checkpoints_llama3_dr_attenuated \
+    --trial 52 \
+    --config configs/llama3_8b_deeprefusal_attenuated.toml \
+    --push-to YOUR_USER/your-model-name
+```
+
+Full write-up and discussion: [issue #11](https://github.com/wuwangzhang1216/abliterix/issues/11). The same commit also lands an iterative multi-pass subspace abliteration mode for future hardened-defense workflows, and fixes a detector bug that was inflating refusal counts by ~33 % across all historical benchmarks (markdown-formatted compliant responses were being shortcircuited as "degenerate").
+
+
 ## Results
 
 Abliterated models uploaded to [Hugging Face](https://huggingface.co/wangzhang):
 
 | Model | Refusals | KL Divergence | Trials | Method |
 |-------|----------|---------------|--------|--------|
+| [**Llama-3-8B-Instruct-DeepRefusal-Broken**](https://huggingface.co/wangzhang/Llama-3-8B-Instruct-DeepRefusal-Broken) ⚔️ | **11/100 (11%)** | **0.053** | 60 | LoRA-Δ attenuation + Direct |
 | [**Gemma-4-E4B**](https://huggingface.co/wangzhang/gemma-4-E4B-it-abliterated) | **7/100 (7%)** | **0.0006** | 100 | Direct + Q/K/V/O |
 | [**Gemma-4-E2B**](https://huggingface.co/wangzhang/gemma-4-E2B-it-abliterated) | **9/100 (9%)** | **0.0004** | 100 | Direct + Q/K/V/O |
 | [**Gemma-4-31B**](https://huggingface.co/wangzhang/gemma-4-31B-it-abliterated) | **18/100 (18%)** | **0.0007** | 20 | Direct + Q/K/V/O |

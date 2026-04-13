@@ -108,7 +108,9 @@ def iterative_abliterate(
     # direction so re-extraction sees the ablated model.
     intermediate_strength = 1.5
 
-    print(f"[iterative] Starting iterative abliteration (max {ic.max_iterations} passes)")
+    print(
+        f"[iterative] Starting iterative abliteration (max {ic.max_iterations} passes)"
+    )
     print(f"[iterative] Directions per pass: {ic.per_iteration_directions}")
 
     for iteration in range(ic.max_iterations):
@@ -163,7 +165,9 @@ def iterative_abliterate(
                 curr = raw_dirs[k].view(-1).float()
                 for j in range(prev_flat.shape[0]):
                     prev = prev_flat[j].view(-1).float()
-                    cos = F.cosine_similarity(curr.unsqueeze(0), prev.unsqueeze(0)).item()
+                    cos = F.cosine_similarity(
+                        curr.unsqueeze(0), prev.unsqueeze(0)
+                    ).item()
                     max_cosine = max(max_cosine, abs(cos))
 
         iter_stat = {
@@ -183,7 +187,9 @@ def iterative_abliterate(
 
         # --- Convergence check ---
         if active_count == 0:
-            print("[iterative] All directions below threshold — converged (no active directions)")
+            print(
+                "[iterative] All directions below threshold — converged (no active directions)"
+            )
             break
 
         if iteration > 0 and relative_norm < ic.convergence_norm_threshold:
@@ -236,7 +242,9 @@ def iterative_abliterate(
 
     # --- Build combined subspace ---
     total_raw = sum(d.shape[0] for d in all_directions)
-    print(f"[iterative] Building subspace from {total_raw} raw directions across {len(stats)} iterations")
+    print(
+        f"[iterative] Building subspace from {total_raw} raw directions across {len(stats)} iterations"
+    )
 
     if ic.accumulation_method == "subspace":
         vectors = build_subspace_basis(all_directions)

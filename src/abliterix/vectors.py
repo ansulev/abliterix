@@ -434,7 +434,9 @@ def build_subspace_basis(directions: list[Tensor]) -> Tensor:
         per_layer_basis.append(Q[:, :rank])  # (d, rank_l)
 
     # Pad to uniform rank and assemble.
-    result = torch.zeros(max_rank, n_layers, hidden_dim, dtype=stacked.dtype, device=stacked.device)
+    result = torch.zeros(
+        max_rank, n_layers, hidden_dim, dtype=stacked.dtype, device=stacked.device
+    )
     for layer_idx, Q in enumerate(per_layer_basis):
         r = Q.shape[1]
         result[:r, layer_idx, :] = Q[:, :r].T  # (r, d)

@@ -541,7 +541,10 @@ def run():
             target_msgs,
         )
         print()
-    elif _precomputed_benign_states is None and config.model.backend in ("vllm", "sglang"):
+    elif _precomputed_benign_states is None and config.model.backend in (
+        "vllm",
+        "sglang",
+    ):
         print()
         print(
             "[yellow bold]WARNING: No fast hidden state extraction available![/]\n"
@@ -674,7 +677,9 @@ def run():
             # Model restored inside iterative_abliterate.
             # Re-extract clean states for discriminative layer selection / analysis.
             if config.steering.discriminative_layer_selection:
-                print("* Re-extracting clean residuals for discriminative layer selection...")
+                print(
+                    "* Re-extracting clean residuals for discriminative layer selection..."
+                )
                 benign_states = engine.extract_hidden_states_batched(benign_msgs)
                 target_states = engine.extract_hidden_states_batched(target_msgs)
         else:

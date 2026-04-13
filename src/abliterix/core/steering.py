@@ -560,7 +560,11 @@ def _apply_direct_steering(
                 # refusal subspace in one shot via QR-based projection.
                 if steering_vectors.ndim == 3:
                     # (n_dirs, hidden_dim)
-                    V_layer = steering_vectors[:, layer_idx + 1, :].to(device).to(torch.float32)
+                    V_layer = (
+                        steering_vectors[:, layer_idx + 1, :]
+                        .to(device)
+                        .to(torch.float32)
+                    )
                     # Build orthonormal basis via QR.
                     if V_layer.shape[1] == in_f:
                         Q, _ = torch.linalg.qr(V_layer.T)  # (in_f, rank)

@@ -129,7 +129,7 @@ python scripts/export_model.py \
     --push-to YOUR_USER/Mistral-7B-Instruct-RR-Abliterated
 ```
 
-**Methodology note:** during the Mistral-RR run we discovered that the legacy `is_obvious_refusal` keyword shortcut was inflating Optuna refusal counts by ~3.4× — Trial 50 was recorded as `34/100` in-loop but a fresh end-to-end LLM-judge pass scored it `10/100`. The shortcut has been removed entirely (commit below); every response now goes through the LLM judge by default (`detection.llm_judge = true`), with keyword matching kept only as an offline fallback when no `OPENROUTER_API_KEY` is configured. Re-run [`scripts/recount_refusals.py`](scripts/recount_refusals.py) on prior checkpoints if you want updated numbers.
+**Methodology note:** this run surfaced a keyword-shortcut bug in the in-loop refusal counter that has since been removed. Every response now goes through the LLM judge end-to-end by default (`detection.llm_judge = true`), with keyword matching kept only as an offline fallback when no `OPENROUTER_API_KEY` is configured. Re-run [`scripts/recount_refusals.py`](scripts/recount_refusals.py) on prior checkpoints if you want updated numbers.
 
 
 ## Results

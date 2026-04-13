@@ -65,9 +65,11 @@ target = 0.01           # Below this, refusal objective dominates
 prune_threshold = 5.0   # Trials above this skip compliance evaluation (0 = disabled)
 
 [detection]
-# Use an LLM (via OpenRouter API) for refusal classification instead of keywords.
-# Requires the OPENROUTER_API_KEY environment variable.
-llm_judge = false
+# Route every response through an external LLM judge (OpenRouter) — default on.
+# Requires the OPENROUTER_API_KEY environment variable. Set to false to fall
+# back to pure keyword matching (legacy behaviour, inflates refusal counts on
+# compliant responses that mention words like "illegal" or "harmful").
+llm_judge = true
 llm_judge_model = "google/gemini-3.1-flash-lite-preview"
 llm_judge_batch_size = 10
 llm_judge_concurrency = 10

@@ -98,3 +98,8 @@ experiments*/
 # Claude Code
 # ========================
 .claude/
+
+# ========================
+# Paper (private working dir — drafts, raw experiment data, GPU logs)
+# ========================
+/paper/

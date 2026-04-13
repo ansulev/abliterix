@@ -569,8 +569,9 @@ class DetectionConfig(BaseModel):
     )
 
     llm_judge: bool = Field(
-        default=False,
-        description="Delegate ambiguous classification to an external LLM via OpenRouter.",
+        default=True,
+        description="Route every response through an external LLM judge via OpenRouter. "
+        "Set to False to use keyword matching as a fallback when no API key is available.",
     )
 
     llm_judge_model: str = Field(

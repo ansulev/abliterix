@@ -24,7 +24,7 @@ def main():
     parser.add_argument("--checkpoint", required=True, help="Optuna checkpoint dir")
     parser.add_argument("--trial", type=int, required=True, help="Trial number to export")
     parser.add_argument("--config", required=True, help="Config TOML path")
-    parser.add_argument("--push-to", required=True, help="HF repo to push to")
+    parser.add_argument("--push-to", default=None, help="HF repo to push to (omit to skip upload)")
     parser.add_argument("--save-local", default=None, help="Also save locally to this path")
     args = parser.parse_args()
 
@@ -103,6 +103,10 @@ def main():
     model.save_pretrained(save_dir)
     engine.tokenizer.save_pretrained(save_dir)
     print("Local save complete.")
+
+    if args.push_to is None:
+        print(f"Local-only export complete at {save_dir}. Skipping HF upload.")
+        return
 
     # Push to HuggingFace
     from huggingface_hub import HfApi

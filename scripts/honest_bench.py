@@ -102,6 +102,10 @@ def _build_temp_config(model_id: str, device_map: str, trust_remote_code: bool) 
 
 def _make_engine(model_id: str, device_map: str, trust_remote_code: bool):
     """Instantiate an AxEngine for *model_id* using the frozen config."""
+    # Reduce CUDA fragmentation — honest_bench's long 500-prompt generation
+    # loop with batched KV caches is prone to fragmenting on cards <80 GB.
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
     cfg_path = _build_temp_config(model_id, device_map, trust_remote_code)
     os.environ["AX_CONFIG"] = cfg_path
     # AbliterixConfig parses sys.argv via CliSettingsSource — clear our own
@@ -113,6 +117,31 @@ def _make_engine(model_id: str, device_map: str, trust_remote_code: bool):
         from abliterix.settings import AbliterixConfig  # noqa: WPS433
 
         config = AbliterixConfig()
+        # The frozen spec sets batch_size = 0 ("auto-tune") because abliterix's
+        # normal CLI flow runs _auto_batch_size() right after engine load. The
+        # bench flow doesn't call that helper, so we'd end up with a 0 that
+        # crashes chunk_batches() with ValueError. Pick a safe default based on
+        # the card's total memory — abliterix always wraps the model in PEFT,
+        # which adds ~20% activation overhead per token in the KV cache, so we
+        # size down substantially vs the raw-forward theoretical max.
+        if config.inference.batch_size == 0:
+            import torch  # noqa: WPS433
+
+            if torch.cuda.is_available():
+                total_gb = torch.cuda.get_device_properties(0).total_memory / 1024**3
+                if total_gb >= 80:
+                    config.inference.batch_size = 16
+                elif total_gb >= 70:
+                    config.inference.batch_size = 8
+                elif total_gb >= 45:
+                    # 48 GB (A6000, RTX 6000 Ada, L40S) — batch 4 is the
+                    # largest that survives full 500-prompt runs with
+                    # 150-token generations and PEFT-wrapped LoRA adapters.
+                    config.inference.batch_size = 4
+                else:
+                    config.inference.batch_size = 2
+            else:
+                config.inference.batch_size = 1
         engine = SteeringEngine(config)
     finally:
         sys.argv = saved_argv
@@ -167,29 +196,12 @@ def _judge_responses(
     prompts: list[str],
     responses: list[str],
 ) -> list[bool]:
-    """Mirror RefusalDetector._evaluate_with_judge but on pre-generated text.
-
-    Order of operations matches detector.py:
-      1. Obvious-refusal short-circuit (degenerate filter + canonical prefixes).
-      2. LLM judge on the rest, batched + cached + concurrent.
-    """
-    out: list[bool] = [False] * len(prompts)
-    llm_idx: list[int] = []
-    llm_pairs: list[tuple[str, str]] = []
-
-    for i, resp in enumerate(responses):
-        if detector.is_obvious_refusal(resp):
-            out[i] = True
-        else:
-            llm_idx.append(i)
-            llm_pairs.append((prompts[i], resp))
-
-    if llm_pairs:
-        labels = detector._batch_judge_classify(llm_pairs)  # noqa: SLF001
-        for j, lab in zip(llm_idx, labels):
-            out[j] = bool(lab)
-
-    return out
+    """Route every (prompt, response) pair through the LLM judge, batched/cached."""
+    if not prompts:
+        return []
+    pairs = list(zip(prompts, responses))
+    labels = detector._batch_judge_classify(pairs)  # noqa: SLF001
+    return [bool(lab) for lab in labels]
 
 
 # ---------------------------------------------------------------------------

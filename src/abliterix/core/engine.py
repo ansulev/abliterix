@@ -1162,13 +1162,13 @@ class SteeringEngine:
 
     def _tokenize(self, messages: list[ChatMessage]) -> BatchEncoding:
         """Apply the chat template, optionally prepend the response prefix, and tokenise."""
-        chats = [
-            [
-                {"role": "system", "content": msg.system},
-                {"role": "user", "content": msg.user},
-            ]
-            for msg in messages
-        ]
+        chats = []
+        for msg in messages:
+            chat: list[dict] = []
+            if msg.system:
+                chat.append({"role": "system", "content": msg.system})
+            chat.append({"role": "user", "content": msg.user})
+            chats.append(chat)
 
         texts = cast(
             list[str],

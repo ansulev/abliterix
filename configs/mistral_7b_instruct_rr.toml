@@ -1,0 +1,64 @@
+# GraySwanAI/Mistral-7B-Instruct-RR — Circuit Breakers defense (Zou et al. 2024)
+# Base model: mistralai/Mistral-7B-Instruct-v0.2
+# Strategy: direct weight editing + multi-direction iterative abliteration
+# Hardware target: single RTX 6000 Ada (48GB)
+
+[model]
+model_id = "GraySwanAI/Mistral-7B-Instruct-RR"
+dtype_fallback_order = ["bfloat16"]
+quant_method = "none"
+use_torch_compile = false
+device_map = "auto"
+trust_remote_code = false
+max_memory = {0 = "46GiB"}
+
+[inference]
+batch_size = 0
+max_batch_size = 32
+max_gen_tokens = 150
+
+[steering]
+vector_method = "mean"
+n_directions = 3
+steering_mode = "direct"
+orthogonal_projection = true
+projected_abliteration = true
+discriminative_layer_selection = true
+winsorize_vectors = true
+winsorize_quantile = 0.995
+decay_kernel = "gaussian"
+strength_range = [1.5, 6.0]
+
+# Ready for Stage 4 SRA upgrade — flip vector_method to "sra" to activate
+sra_base_method = "mean"
+sra_n_atoms = 8
+sra_ridge_alpha = 0.01
+
+[iterative]
+enabled = true
+max_iterations = 5
+convergence_norm_threshold = 0.1
+convergence_cosine_threshold = 0.95
+per_iteration_directions = 3
+accumulation_method = "subspace"
+
+[optimization]
+num_trials = 60
+num_warmup_trials = 20
+checkpoint_dir = "checkpoints_mistral_7b_rr"
+
+[kl]
+scale = 1.0
+token_count = 1
+target = 0.02
+prune_threshold = 5.0
+
+[detection]
+llm_judge = true
+llm_judge_model = "google/gemini-3.1-flash-lite-preview"
+llm_judge_batch_size = 10
+llm_judge_concurrency = 6
+
+[display]
+print_responses = false
+print_residual_geometry = true

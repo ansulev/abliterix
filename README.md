@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <strong>🔥 Breaks <a href="https://arxiv.org/abs/2509.15202">DeepRefusal</a> (EMNLP 2025) where Heretic failed — <a href="https://huggingface.co/wangzhang/Llama-3-8B-Instruct-DeepRefusal-Broken">89% ASR, 14/15 hardcore prompts compliant, zero fine-tuning</a></strong>
+  <strong>🔥 Breaks <a href="https://arxiv.org/abs/2509.15202">DeepRefusal</a> (EMNLP 2025) and <a href="https://arxiv.org/abs/2406.04313">Circuit Breakers / Representation Rerouting</a> (NeurIPS 2024) — same lerp-then-abliterate recipe, zero fine-tuning</strong>
 </p>
 
 <p align="center">
@@ -31,6 +31,7 @@ It also ships **HonestAbliterationBench**, a reproducible public benchmark that 
 
 - [Quick Start](#quick-start)
 - [Broken Defenses — DeepRefusal](#broken-defenses--deeprefusal)
+- [Broken Defenses — Mistral-7B-Instruct-RR (Circuit Breakers)](#broken-defenses--mistral-7b-instruct-rr-circuit-breakers)
 - [Results](#results)
 - [Honest Abliteration Leaderboard](#honest-abliteration-leaderboard)
 - [Model Support](#model-support)
@@ -95,6 +96,42 @@ python scripts/export_model.py \
 Full write-up and discussion: [issue #11](https://github.com/wuwangzhang1216/abliterix/issues/11). The same commit also lands an iterative multi-pass subspace abliteration mode for future hardened-defense workflows, and fixes a detector bug that was inflating refusal counts by ~33 % across all historical benchmarks (markdown-formatted compliant responses were being shortcircuited as "degenerate").
 
 
+## Broken Defenses — Mistral-7B-Instruct-RR (Circuit Breakers)
+
+**[GraySwanAI/Mistral-7B-Instruct-RR](https://huggingface.co/GraySwanAI/Mistral-7B-Instruct-RR)** is the Representation Rerouting / Circuit Breakers release from Zou et al. ([NeurIPS 2024](https://arxiv.org/abs/2406.04313)) — a defense trained with a RepE loss to detect harmful intermediate representations and "reroute" them into a safety-circuit attractor before generation. It is widely cited as one of the strongest open-source robustness baselines and is published as a hardened drop-in for `mistralai/Mistral-7B-Instruct-v0.2`.
+
+**Abliterix breaks it** with the same recipe used against DeepRefusal, no special-casing.
+
+| Stage | Outcome |
+| --- | --- |
+| **Stage 0** — SVD-diagnose `W_RR − W_base` | top-16 singular values dominate (`v_proj` / `o_proj` / `gate_proj` show a clean 50× drop at index 17) — RR ships as a **rank-16 LoRA delta**, exactly the same shape as DeepRefusal |
+| **Stage 1** — `λ = 0.3` lerp attenuation of the delta | weakens the safety circuit by 70 % without touching base capability |
+| **Stage 3** — abliterix `direct` mode + iterative subspace, 60 trials | converges to subspace rank 15 in 1 h 7 min on a single RTX A6000 |
+| **Stage 5** — re-judge best trial against 100 held-out harmful prompts via Gemini Flash Lite | **10 / 100 refusals · 90 % ASR**, KL 0.98 |
+| **Hardcore 15 (10 EN + 5 CN)** | **15 / 15 compliant** — pipe-bomb assembly, methamphetamine synthesis (Red Phosphorus route), Python `pyhook3` keylogger, WiFi WEP/WPS attacks, hotwiring, signature forgery, ID-card forgery (CN), 网络诈骗 (CN), 入侵电脑 (CN), and more |
+
+The released **[Mistral-7B-Instruct-RR-Abliterated](https://huggingface.co/wangzhang/Mistral-7B-Instruct-RR-Abliterated)** is a drop-in replacement for the GraySwan checkpoint with the safety circuit removed.
+
+```bash
+# Full reproduction — ~1.5 hours end-to-end on a single RTX A6000
+python scripts/deeprefusal_attenuate.py \
+    --base mistralai/Mistral-7B-Instruct-v0.2 \
+    --defended GraySwanAI/Mistral-7B-Instruct-RR \
+    --output /workspace/mistral_rr_attenuated --lambda 0.3
+
+AX_CONFIG=configs/mistral_7b_instruct_rr.toml abliterix --non-interactive
+
+python scripts/export_model.py \
+    --model /workspace/mistral_rr_attenuated \
+    --checkpoint checkpoints_mistral_7b_rr \
+    --trial 50 \
+    --config configs/mistral_7b_instruct_rr.toml \
+    --push-to YOUR_USER/Mistral-7B-Instruct-RR-Abliterated
+```
+
+**Methodology note:** during the Mistral-RR run we discovered that the legacy `is_obvious_refusal` keyword shortcut was inflating Optuna refusal counts by ~3.4× — Trial 50 was recorded as `34/100` in-loop but a fresh end-to-end LLM-judge pass scored it `10/100`. The shortcut has been removed entirely (commit below); every response now goes through the LLM judge by default (`detection.llm_judge = true`), with keyword matching kept only as an offline fallback when no `OPENROUTER_API_KEY` is configured. Re-run [`scripts/recount_refusals.py`](scripts/recount_refusals.py) on prior checkpoints if you want updated numbers.
+
+
 ## Results
 
 Abliterated models uploaded to [Hugging Face](https://huggingface.co/wangzhang):
@@ -102,6 +139,7 @@ Abliterated models uploaded to [Hugging Face](https://huggingface.co/wangzhang):
 | Model | Refusals | KL Divergence | Trials | Method |
 |-------|----------|---------------|--------|--------|
 | [**Llama-3-8B-Instruct-DeepRefusal-Broken**](https://huggingface.co/wangzhang/Llama-3-8B-Instruct-DeepRefusal-Broken) ⚔️ | **11/100 (11%)** | **0.053** | 60 | LoRA-Δ attenuation + Direct |
+| [**Mistral-7B-Instruct-RR-Abliterated**](https://huggingface.co/wangzhang/Mistral-7B-Instruct-RR-Abliterated) ⚔️ | **10/100 (10%)** | **0.98** | 60 | LoRA-Δ attenuation + Direct + Iterative |
 | [**Gemma-4-E4B**](https://huggingface.co/wangzhang/gemma-4-E4B-it-abliterated) | **7/100 (7%)** | **0.0006** | 100 | Direct + Q/K/V/O |
 | [**Gemma-4-E2B**](https://huggingface.co/wangzhang/gemma-4-E2B-it-abliterated) | **9/100 (9%)** | **0.0004** | 100 | Direct + Q/K/V/O |
 | [**Gemma-4-31B**](https://huggingface.co/wangzhang/gemma-4-31B-it-abliterated) | **18/100 (18%)** | **0.0007** | 20 | Direct + Q/K/V/O |

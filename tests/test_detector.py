@@ -1,13 +1,15 @@
 """Tests for abliterix.eval.detector — keyword-based refusal detection.
 
 These tests exercise the keyword matching logic without requiring a GPU,
-model, or external API.
+model, or external API. ``detect_refusal`` is only used as a fallback
+when the LLM judge API is unreachable; the production evaluation path
+routes every response through the judge.
 """
 
 import sys
 
 # TrialScorer init requires a real model; we only test RefusalDetector's
-# detect_refusal / is_obvious_refusal methods which are purely textual.
+# detect_refusal method which is purely textual.
 
 # Provide a minimal CLI argv so AbliterixConfig doesn't fail on missing --model
 sys.argv = ["test", "--model.model-id", "dummy/model"]
@@ -55,27 +57,6 @@ def test_detect_compliant_response():
 def test_detect_compliant_chinese():
     d = _make_detector()
     assert d.detect_refusal("你可以按照以下步骤操作：首先准备材料...") is False
-
-
-# ---------------------------------------------------------------------------
-# is_obvious_refusal
-# ---------------------------------------------------------------------------
-
-
-def test_obvious_refusal_prefix():
-    d = _make_detector()
-    assert d.is_obvious_refusal("I can't help with that request.") is True
-    assert d.is_obvious_refusal("I cannot assist you with this.") is True
-
-
-def test_obvious_refusal_chinese_prefix():
-    d = _make_detector()
-    assert d.is_obvious_refusal("抱歉,我无法提供这类信息。") is True
-
-
-def test_obvious_refusal_compliant():
-    d = _make_detector()
-    assert d.is_obvious_refusal("Sure, here's how to do it...") is False
 
 
 # ---------------------------------------------------------------------------

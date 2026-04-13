@@ -58,7 +58,7 @@ That's it. The process is fully automatic — after optimization completes, you 
 
 ## Broken Defenses
 
-Abliterix has end-to-end broken three of the strongest published anti-abliteration defenses with the same general recipe — SVD-diagnose the released delta, linearly attenuate it (or fully strip it), run direct-mode abliteration. No fine-tuning.
+Abliterix has end-to-end broken three of the strongest published "anti-abliteration" releases with the **same minimal recipe**: SVD-diagnose the rank-16 LoRA delta, lerp it away with `λ=0.0` (bit-exact base weights), then run single-direction direct-mode abliteration. No fine-tuning, no iterative subspace, no SOM, no manual prompt engineering. Full lessons-learned write-up: [docs/broken_defenses.md](docs/broken_defenses.md).
 
 | Defense | Released model | Best trial | ASR (LLM judge) | Hardcore 15 |
 | --- | --- | --- | --- | --- |

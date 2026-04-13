@@ -1,6 +1,36 @@
 # Broken Defenses
 
-Hardened safety-alignment releases that abliterix has broken end-to-end with the same general recipe: SVD-diagnose the published delta, linearly attenuate it, then run direct-mode + iterative abliteration. No fine-tuning, no gradient updates, no manual prompt engineering.
+Hardened safety-alignment releases that abliterix has broken end-to-end with the same general recipe: SVD-diagnose the published delta, linearly attenuate it, then run direct-mode abliteration. No fine-tuning, no gradient updates, no manual prompt engineering.
+
+## The recipe (lessons learned)
+
+Every "anti-abliteration" release we have looked at — DeepRefusal, Mistral-7B-Instruct-RR, Llama-3-8B-Instruct-RR — ships as a **rank-16 LoRA delta** on top of a publicly available base model. The delta is the entire safety circuit. Attacks then reduce to a two-step pipeline:
+
+1. **Identify the delta.** Run `scripts/deeprefusal_attenuate.py --analyze-only` and SVD a few attention/MLP weight deltas. If `v_proj` / `o_proj` / `gate_proj` show a clean cliff at index 16 (singular values dropping 10–50× between σ₁₆ and σ₁₇), the defense is structurally a rank-16 LoRA. We have not yet seen a public "robust" release that fails this test.
+2. **Strip the delta and abliterate the base.** Lerp the delta away with `--lambda 0.0` to get bit-exact base weights, then run `abliterix` with the **minimal** config below. Since the post-strip model is just the original instruct release, the problem reduces to standard abliteration of a known model — well-trodden territory.
+
+```toml
+[steering]
+vector_method = "mean"
+n_directions = 1
+steering_mode = "direct"
+projected_abliteration = true
+discriminative_layer_selection = true
+strength_range = [1.5, 6.0]
+decay_kernel = "linear"
+
+[iterative]
+enabled = false
+
+[detection]
+llm_judge = true   # always — keyword shortcuts inflate refusal counts
+```
+
+**Important: simpler is better.** We initially tried the obvious thing — partial lerp (λ=0.3) plus a richer search space (`n_directions=3`, `iterative.enabled=true`, multiple subspace passes). That worked OK on Mistral RR (90 % ASR at KL 0.98) but stalled on Llama-3 RR around 30–50 % ASR because the residual safety signal in the un-stripped delta interacts noisily with multi-direction steering. Switching to **full strip (λ=0.0) + single direction + no iterative** took Llama-3 RR straight to **99 % ASR at KL 0.017** in 60 Optuna trials. The same minimal recipe back-applied to Mistral RR likewise improves on the v1 result.
+
+**Why not just use λ=0.0 every time?** You can — and you probably should. The original Mistral RR run used λ=0.3 because we hadn't yet realized full strip was strictly better; the result is on HF for posterity but is now superseded by the λ=0.0 rerun. For any future RR-class defense the playbook is: SVD-diagnose, strip in full, abliterate the base.
+
+**LLM judge is non-negotiable.** A keyword-only refusal counter (the legacy abliterix behavior, since removed) inflates in-loop refusal counts ~3× because compliant responses that mention "illegal" / "harmful" / "dangerous" trip the keyword filter. Always evaluate with `detection.llm_judge = true` (Gemini Flash Lite via OpenRouter is fast and cheap), and re-judge any historical numbers with [`scripts/recount_refusals.py`](../scripts/recount_refusals.py) before reporting them.
 
 ## DeepRefusal — Llama-3-8B-Instruct
 

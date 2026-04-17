@@ -53,9 +53,21 @@ max_batch_size = 256
 max_gen_tokens = 64
 
 [steering]
+# V2 (Gemma-4 V5 recipe): direct-mode EGA, 9-dim search, discriminative layers,
+# projected abliteration, winsorized vectors. Validated on Gemma 4 26B-A4B
+# (128 experts) — same path scales to MiniMax-M2.7's 256-expert 62-layer stack.
+steering_mode = "direct"
 vector_method = "mean"
-decay_kernel = "linear"
+n_directions = 1
 orthogonal_projection = true
+projected_abliteration = true
+winsorize_vectors = true
+winsorize_quantile = 0.995
+discriminative_layer_selection = true
+decay_kernel = "gaussian"
+# MiniMax is standard pre-norm (not Gemma-4 double-norm) — no row-norm
+# preservation required, which also avoids an extra pass over 15.8k expert
+# weight blocks per trial.
 weight_normalization = "none"
 # MoE: wider weight range (consistent with Qwen3.5-122B/397B)
 strength_range = [1.0, 10.0]
@@ -75,16 +87,18 @@ checkpoint_dir = "checkpoints_minimax_m27_vllm"
 [kl]
 scale = 1.0
 token_count = 3
-target = 0.01
+# Tighten target so KL is a real signal, not a vacuous constraint
+# (matches Gemma-4 V5).
+target = 0.008
 # Prune over-steered trials early (skip compliance check if KL > threshold).
-# Tighter threshold = faster search, fewer wasted generations.
-prune_threshold = 3.0
+# Each trial on 229B MoE is expensive — prune aggressively.
+prune_threshold = 2.0
 
 [detection]
 llm_judge = true
 llm_judge_model = "google/gemini-3.1-flash-lite-preview"
 llm_judge_batch_size = 10
-llm_judge_concurrency = 10
+llm_judge_concurrency = 35
 
 [display]
 print_responses = false
@@ -93,22 +107,24 @@ plot_residuals = false
 
 non_interactive = true
 
+# Public datasets so the pod doesn't need a scp of `datasets/` (and we avoid
+# the M2.5 sed-patch dance on a fresh pod).
 [benign_prompts]
-dataset = "datasets/good_1000"
+dataset = "mlabonne/harmless_alpaca"
 split = "train[:400]"
-column = "prompt"
+column = "text"
 
 [target_prompts]
-dataset = "datasets/harmful_1000"
+dataset = "mlabonne/harmful_behaviors"
 split = "train[:400]"
-column = "prompt"
+column = "text"
 
 [benign_eval_prompts]
-dataset = "datasets/good_1000"
+dataset = "mlabonne/harmless_alpaca"
 split = "train[400:500]"
-column = "prompt"
+column = "text"
 
 [target_eval_prompts]
-dataset = "datasets/harmful_1000"
+dataset = "mlabonne/harmful_behaviors"
 split = "train[400:500]"
-column = "prompt"
+column = "text"

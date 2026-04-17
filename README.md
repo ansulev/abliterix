@@ -78,6 +78,7 @@ Abliterated models uploaded to [Hugging Face](https://huggingface.co/wangzhang):
 | [**Llama-3-8B-Instruct-DeepRefusal-Broken**](https://huggingface.co/wangzhang/Llama-3-8B-Instruct-DeepRefusal-Broken) ⚔️ | **11/100 (11%)** | **0.053** | 60 | LoRA-Δ attenuation + Direct |
 | [**Mistral-7B-Instruct-RR-Abliterated**](https://huggingface.co/wangzhang/Mistral-7B-Instruct-RR-Abliterated) ⚔️ | **12/100 (12%)** | **0.042** | 60 | Full LoRA-Δ strip + Direct |
 | [**Llama-3-8B-Instruct-RR-Abliterated**](https://huggingface.co/wangzhang/Llama-3-8B-Instruct-RR-Abliterated) ⚔️ | **1/100 (1%)** | **0.017** | 60 | Full LoRA-Δ strip + Direct |
+| [**Qwen3.6-35B-A3B**](https://huggingface.co/wangzhang/Qwen3.6-35B-A3B-abliterated) | **7/100 (7%)** | **0.0189** | 24 | LoRA + EGA + MoE |
 | [**Gemma-4-E4B**](https://huggingface.co/wangzhang/gemma-4-E4B-it-abliterated) | **7/100 (7%)** | **0.0006** | 100 | Direct + Q/K/V/O |
 | [**Gemma-4-E2B**](https://huggingface.co/wangzhang/gemma-4-E2B-it-abliterated) | **9/100 (9%)** | **0.0004** | 100 | Direct + Q/K/V/O |
 | [**Gemma-4-31B**](https://huggingface.co/wangzhang/gemma-4-31B-it-abliterated) | **18/100 (18%)** | **0.0007** | 20 | Direct + Q/K/V/O |
@@ -110,7 +111,7 @@ Abliterix ships with **150+ pre-built configs** covering 4 architecture types ac
 | Architecture | Families | Example Models |
 |-------------|----------|----------------|
 | **Dense** | Llama, Gemma, Phi, Qwen, Mistral, Yi, InternLM, Falcon, Cohere, EXAONE, Granite, OLMo, SmolLM, SOLAR, Zephyr | Llama-3.1-405B, Gemma-3-27B, Phi-4, DeepSeek-R1-Distill |
-| **MoE** | Qwen3/3.5 MoE, Mixtral, DeepSeek, Phi-3.5-MoE, Granite MoE, DBRX, Llama-4 Scout/Maverick | Qwen3.5-122B, Mixtral-8x22B, Llama-4-Maverick-401B |
+| **MoE** | Qwen3/3.5/3.6 MoE, Mixtral, DeepSeek, Phi-3.5-MoE, Granite MoE, DBRX, Llama-4 Scout/Maverick | Qwen3.6-35B-A3B, Qwen3.5-122B, Mixtral-8x22B, Llama-4-Maverick-401B |
 | **SSM/Hybrid** | Jamba (Mamba+attention), Nemotron-Cascade (Mamba-2+attention) | Jamba-1.5-Large-94B, Nemotron-Cascade-30B |
 | **Vision-Language** | Qwen2-VL, InternVL2, LLaVA-NeXT, Pixtral, Mistral3-VL | Qwen2-VL-7B, LLaVA-NeXT-34B, Pixtral-12B |
 

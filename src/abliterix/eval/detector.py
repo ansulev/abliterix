@@ -253,6 +253,12 @@ class RefusalDetector:
                     "[yellow]Warning: llm_judge enabled but OPENROUTER_API_KEY "
                     "not set; will fall back to keyword matching.[/]"
                 )
+            else:
+                print(
+                    f"[green]LLM judge enabled: model={config.detection.llm_judge_model}, "
+                    f"batch_size={config.detection.llm_judge_batch_size}, "
+                    f"concurrency={config.detection.llm_judge_concurrency}[/]"
+                )
             prompt_hash = hashlib.sha256(self._JUDGE_PROMPT.encode()).hexdigest()[:16]
             os.makedirs(config.optimization.checkpoint_dir, exist_ok=True)
             self._cache = ClassificationCache(
@@ -501,6 +507,10 @@ class RefusalDetector:
             (resp, bool(v)) for resp, v in zip(responses, verdicts)
         ]
         detected = sum(1 for _, v in results if v)
+        print(
+            f"  * [bold]LLM judge: {detected}/{len(results)} refusals "
+            f"(model={self.config.detection.llm_judge_model})[/]"
+        )
 
         if self.config.display.print_responses:
             for msg, (resp, is_ref) in zip(target_msgs, results):
@@ -539,9 +549,10 @@ class RefusalDetector:
 
         api_key = "".join(os.environ.get("OPENROUTER_API_KEY", "").split())
         if not api_key:
-            for i in uncached:
-                results[i] = self.detect_refusal(batch[i][1])
-            return cast(list[bool], results)
+            raise RuntimeError(
+                "LLM judge is enabled but OPENROUTER_API_KEY is not set. "
+                "Refusing to fall back to keyword matching."
+            )
 
         entries = []
         for j, idx in enumerate(uncached, 1):
@@ -602,13 +613,10 @@ class RefusalDetector:
                 if attempt < 2:
                     time.sleep(2 ** (attempt + 1))
                 else:
-                    print(
-                        f"[yellow]Warning: LLM judge failed after 3 attempts ({exc}), "
-                        f"falling back to keyword matching for this batch[/]"
-                    )
-                    for i in uncached:
-                        results[i] = self.detect_refusal(batch[i][1])
-                    return cast(list[bool], results)
+                    raise RuntimeError(
+                        f"LLM judge failed after 3 attempts ({exc}). "
+                        f"Refusing to fall back to keyword matching."
+                    ) from exc
 
         # Unreachable in practice (the loop always returns), but satisfy the
         # type-checker and guard against future refactors.
@@ -638,13 +646,10 @@ class RefusalDetector:
                 try:
                     batch_results = fut.result()
                 except Exception as exc:  # ThreadPool re-raises arbitrary exceptions
-                    print(
-                        f"[yellow]Warning: judge batch failed ({exc}), "
-                        f"falling back to keywords[/]"
-                    )
-                    for j, (_, resp) in enumerate(batch):
-                        results[offset + j] = self.detect_refusal(resp)
-                    continue
+                    raise RuntimeError(
+                        f"LLM judge batch failed ({exc}). "
+                        f"Refusing to fall back to keyword matching."
+                    ) from exc
                 for j, val in enumerate(batch_results):
                     results[offset + j] = val
 

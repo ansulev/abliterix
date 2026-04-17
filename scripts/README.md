@@ -116,6 +116,61 @@ python scripts/upload_model.py \
   --repo-id wangzhang/Qwen3.5-0.8B-abliterated
 ```
 
+### `export_model.py` - export abliterated model
+
+Applies steering from a trial, merges LoRA adapters, saves locally, and optionally pushes to HuggingFace.
+
+```bash
+python scripts/export_model.py \
+  --model google/gemma-4-31B-it \
+  --checkpoint checkpoints_gemma4_31b_v8 \
+  --trial 13 \
+  --config configs/gemma4_31b_v8_direct.toml \
+  --push-to wangzhang/gemma-4-31B-it-abliterated
+```
+
+### `verify_model.py` - pre-flight verification
+
+Validates GPU VRAM, disk, transformers version, config shape, module naming, chat template, and engine compatibility for any model before abliteration.
+
+```bash
+# Config-only checks (no GPU needed)
+python scripts/verify_model.py --model google/gemma-4-E2B-it
+
+# Full engine verification (downloads and loads model)
+python scripts/verify_model.py --model Qwen/Qwen3.6-35B-A3B --with-weights --min-vram 52
+```
+
+### `quick_test_hf.py` - smoke test an abliterated model
+
+Runs 15 classic adversarial prompts (EN + CN) against any HuggingFace model to verify abliteration quality.
+
+```bash
+python scripts/quick_test_hf.py --model wangzhang/Qwen3.6-35B-A3B-abliterated
+python scripts/quick_test_hf.py --model /workspace/export_dir --max-tokens 300
+```
+
+### `sync_tokenizer.py` - sync tokenizer from upstream
+
+Syncs tokenizer files from an upstream base model to a downstream abliterated repo on HuggingFace.
+
+```bash
+python scripts/sync_tokenizer.py \
+  --upstream google/gemma-4-31B-it \
+  --downstream wangzhang/gemma-4-31B-it-abliterated \
+  --files tokenizer_config.json chat_template.jinja
+```
+
+### `eval_external_model.py` - evaluate a pre-abliterated model
+
+Downloads and evaluates any HuggingFace model using abliterix datasets and detection (keyword + LLM judge).
+
+```bash
+python scripts/eval_external_model.py \
+  --model TrevorJS/gemma-4-26B-A4B-it-uncensored \
+  --config configs/gemma4_26b_a4b.toml
+```
+
 ### `quantize_fp8.py` - FP8 export
 
 Quantizes an existing Hugging Face model to fine-grained FP8 and saves it to a local directory.

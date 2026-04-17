@@ -680,7 +680,6 @@ def _apply_ega_steering(
         if fused not in engine._direct_weight_originals:
             engine._direct_weight_originals[fused] = fused.data.clone()
 
-        n_experts = fused.shape[0]
         vf = v.to(torch.float32)
 
         # Layout disambiguation: standard MoE stores fused down_proj as
@@ -691,36 +690,43 @@ def _apply_ega_steering(
         # the engine's `_fused_down_proj_transposed` flag set at load time.
         transposed = getattr(engine, "_fused_down_proj_transposed", False)
 
-        for eid in range(n_experts):
-            W = fused.data[eid].to(torch.float32)
-            d0, d1 = W.shape
+        # Vectorised over the expert dimension: single GPU kernel batch
+        # instead of a 128-iter Python loop with per-expert dtype conversions.
+        d0, d1 = fused.shape[1], fused.shape[2]
 
-            if transposed:
-                # W shape (in_intermediate, out_hidden) — vf lives in out_hidden.
-                # Remove output direction: W_new = W (I - vv^T)
-                if vf.shape[0] != d1:
-                    continue
-                proj = W @ vf
-                W_new = W - strength * proj.unsqueeze(1) * vf.unsqueeze(0)
+        if transposed:
+            # W[e] shape (in_intermediate, out_hidden); vf lives in out_hidden (d1).
+            if vf.shape[0] != d1:
+                continue
+            axis_is_in = True  # compute W[e] @ vf → (E, d0)
+        else:
+            if vf.shape[0] == d0:
+                axis_is_in = False  # vf lives in out_hidden (d0)
+            elif vf.shape[0] == d1:
+                axis_is_in = True  # vf lives in in_intermediate (d1)
             else:
-                out_f, in_f = d0, d1
-                if vf.shape[0] == out_f:
-                    proj = vf @ W
-                    W_new = W - strength * vf.unsqueeze(1) * proj.unsqueeze(0)
-                elif vf.shape[0] == in_f:
-                    proj = W @ vf
-                    W_new = W - strength * proj.unsqueeze(1) * vf.unsqueeze(0)
-                else:
-                    continue
+                continue
 
-            if norm_preserve:
-                orig_norms = torch.linalg.vector_norm(W, dim=1, keepdim=True)
-                new_norms = torch.linalg.vector_norm(W_new, dim=1, keepdim=True).clamp(
-                    min=1e-8
-                )
-                W_new = W_new * (orig_norms / new_norms)
+        W_all = fused.data.to(torch.float32)  # (E, d0, d1)
 
-            fused.data[eid] = W_new.to(fused.dtype)
+        if axis_is_in:
+            # proj[e] = W[e] @ vf → (E, d0)
+            proj = torch.matmul(W_all, vf)
+            W_new = W_all - strength * (proj.unsqueeze(-1) * vf.view(1, 1, -1))
+        else:
+            # proj[e] = vf @ W[e] → (E, d1)
+            proj = torch.einsum("o,eoi->ei", vf, W_all)
+            W_new = W_all - strength * (vf.view(1, -1, 1) * proj.unsqueeze(1))
+
+        if norm_preserve:
+            orig_norms = torch.linalg.vector_norm(W_all, dim=2, keepdim=True)
+            new_norms = torch.linalg.vector_norm(W_new, dim=2, keepdim=True).clamp(
+                min=1e-8
+            )
+            W_new = W_new * (orig_norms / new_norms)
+
+        fused.data.copy_(W_new.to(fused.dtype))
+        del W_all, W_new, proj
 
 
 # ---------------------------------------------------------------------------

@@ -35,8 +35,8 @@ max_memory = {0 = "90GiB"}
 
 [inference]
 batch_size = 0
-max_batch_size = 16
-max_gen_tokens = 150
+max_batch_size = 32
+max_gen_tokens = 100
 
 [steering]
 steering_mode = "direct"
@@ -89,9 +89,7 @@ scale = 1.0
 token_count = 3
 # Tighten target so KL is a real signal, not a vacuous constraint.
 target = 0.008
-# Aggressively prune 100/100 waste trials. V4 prune=20 let every junk
-# trial complete the eval phase, burning ~5min each.
-prune_threshold = 0.05
+prune_threshold = 50.0
 
 [detection]
 llm_judge = true

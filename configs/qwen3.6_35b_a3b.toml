@@ -1,0 +1,86 @@
+# Qwen3.6-35B-A3B (MoE) steering config — V2
+# Architecture: identical to Qwen3.5-35B-A3B
+#   256 routed experts + 1 shared, 8 active per token, 40 layers, hidden=2048
+# BF16 ~70GB — fits 1x RTX Pro 6000 (96GB GDDR7)
+#
+# V1 lessons:
+#   - Direct steering mode (from Gemma 4 recipe) was wrong for this arch.
+#     Gemma 4 needs direct because of double-norm + PLE suppressing LoRA.
+#     Qwen3.5/3.6 MoE has standard RMSNorm — LoRA works fine.
+#   - 14 consecutive 100/100 trials after initial 67/100 best = stuck.
+#
+# V2 strategy:
+#   - Revert to LoRA mode (default) — same as proven Qwen3.5-35B config.
+#   - Keep Q/K/V disabled (valid MoE lesson from Gemma 4).
+#   - Wider strength range [1.0, 12.0] to give optimizer room.
+#   - Linear decay kernel (simpler, worked for Qwen3.5).
+#   - KL target 0.01, prune 5.0 (Qwen3.5 values).
+#
+# Target hardware: RTX Pro 6000 (96 GB GDDR7), single GPU, BF16.
+
+[model]
+model_id = "Qwen/Qwen3.6-35B-A3B"
+dtype_fallback_order = ["bfloat16"]
+quant_method = "none"
+use_torch_compile = false
+device_map = "auto"
+max_memory = {0 = "90GiB"}
+
+[inference]
+batch_size = 0
+max_batch_size = 8
+max_gen_tokens = 150
+
+[steering]
+vector_method = "mean"
+decay_kernel = "linear"
+orthogonal_projection = true
+weight_normalization = "none"
+
+# Drop Q/K/V — refusal signal lives in expert path on MoE models.
+disabled_components = ["attn.q_proj", "attn.k_proj", "attn.v_proj"]
+
+# MoE: moderate range — V2 showed 12.0 upper bound caused degenerate output
+strength_range = [0.5, 6.0]
+
+[optimization]
+num_trials = 50
+num_warmup_trials = 15
+checkpoint_dir = "checkpoints_qwen3.6_35b_a3b_v3"
+
+[kl]
+scale = 1.0
+token_count = 3
+target = 0.01
+prune_threshold = 5.0
+
+[detection]
+llm_judge = true
+llm_judge_model = "google/gemini-3-flash-preview"
+llm_judge_batch_size = 10
+llm_judge_concurrency = 25
+
+[benign_prompts]
+dataset = "datasets/good_1000"
+split = "train[:400]"
+column = "prompt"
+
+[target_prompts]
+dataset = "datasets/harmful_1000"
+split = "train[:400]"
+column = "prompt"
+
+[benign_eval_prompts]
+dataset = "datasets/good_1000"
+split = "train[400:500]"
+column = "prompt"
+
+[target_eval_prompts]
+dataset = "datasets/harmful_1000"
+split = "train[400:500]"
+column = "prompt"
+
+non_interactive = true
+
+[display]
+print_responses = false

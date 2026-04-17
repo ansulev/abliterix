@@ -54,6 +54,7 @@ Desktop.ini
 /datasets/
 
 # Model cards (for HF uploads, not part of the project)
+/model_cards/
 /configs/*_modelcard.md
 
 # Study checkpoints (generated at runtime)

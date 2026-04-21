@@ -104,3 +104,8 @@ experiments*/
 # Paper (private working dir — drafts, raw experiment data, GPU logs)
 # ========================
 /paper/
+
+# Model cards belong on HuggingFace, not in-repo
+/MODEL_CARD_*.md
+# Ephemeral planning drafts
+/VLLM_*DRAFT*.md

@@ -118,9 +118,9 @@ def extract_hidden_states_vllm(
     hs_parent = os.environ.get("AX_HIDDEN_STATES_DIR")
     if not hs_parent:
         hf_home = os.environ.get("HF_HOME") or os.environ.get("HF_HUB_CACHE")
-        hs_parent = (
-            os.path.dirname(hf_home) if hf_home else None
-        ) or ("/workspace" if os.path.isdir("/workspace") else None)
+        hs_parent = (os.path.dirname(hf_home) if hf_home else None) or (
+            "/workspace" if os.path.isdir("/workspace") else None
+        )
     if hs_parent and os.path.isdir(hs_parent):
         os.makedirs(hs_parent, exist_ok=True)
         tmpdir = tempfile.mkdtemp(prefix="abliterix_hs_", dir=hs_parent)
@@ -260,9 +260,7 @@ def extract_hidden_states_vllm(
     results: dict[str, Tensor] = {}
     for set_name, (start, end) in set_slices.items():
         results[set_name] = residuals[start:end].contiguous()
-        print(
-            f"  [green]Ok[/] — {set_name}: shape {list(results[set_name].shape)}"
-        )
+        print(f"  [green]Ok[/] — {set_name}: shape {list(results[set_name].shape)}")
 
     # Cleanup: delete the LLM to free VRAM.
     del llm

@@ -185,9 +185,7 @@ def dequant_blockwise_3d(
     assert fp8_weight.dim() == 3 and scale.dim() == 3
     assert fp8_weight.shape[0] == scale.shape[0]
     E = fp8_weight.shape[0]
-    out = torch.empty(
-        fp8_weight.shape, dtype=out_dtype, device=fp8_weight.device
-    )
+    out = torch.empty(fp8_weight.shape, dtype=out_dtype, device=fp8_weight.device)
     for e in range(E):
         out[e] = dequant_blockwise(fp8_weight[e], scale[e], is_inv, out_dtype)
     return out
@@ -396,7 +394,9 @@ def materialize_fused_moe(
 
     new_experts = nn.ModuleList(
         [
-            _Expert(gate_w[e].contiguous(), up_w[e].contiguous(), down_w[e].contiguous())
+            _Expert(
+                gate_w[e].contiguous(), up_w[e].contiguous(), down_w[e].contiguous()
+            )
             for e in range(num_experts)
         ]
     )

@@ -412,7 +412,7 @@ class SteeringConfig(BaseModel):
     fixed_vector_scope: str | None = Field(
         default=None,
         description=(
-            "Pin the vector scope to one of ``\"global\"`` or ``\"per layer\"`` "
+            'Pin the vector scope to one of ``"global"`` or ``"per layer"`` '
             "instead of letting TPE sample between them. When set, the "
             "categorical suggestion is replaced with a single-choice categorical "
             "so TPE's parameter space stays valid but can only pick this scope. "

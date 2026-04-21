@@ -326,10 +326,7 @@ class SteeringEngine:
                 if config.model.attn_implementation is not None:
                     extra["attn_implementation"] = config.model.attn_implementation
 
-                if (
-                    getattr(config.model, "experts_implementation", None)
-                    is not None
-                ):
+                if getattr(config.model, "experts_implementation", None) is not None:
                     extra["experts_implementation"] = (
                         config.model.experts_implementation
                     )
@@ -355,13 +352,8 @@ class SteeringEngine:
                 #   'forward_dequant'— monkey-patch forward (1x VRAM; LoRA only)
                 #   'offline'        — assume pre-dequanted; no FP8 path
                 if is_fp8:
-                    handling = getattr(
-                        self.config.model, "fp8_handling", "auto"
-                    )
-                    direct = (
-                        self.config.steering.steering_mode
-                        == SteeringMode.DIRECT
-                    )
+                    handling = getattr(self.config.model, "fp8_handling", "auto")
+                    direct = self.config.steering.steering_mode == SteeringMode.DIRECT
                     if handling == "auto":
                         handling = "materialize" if direct else "forward_dequant"
 
@@ -383,9 +375,7 @@ class SteeringEngine:
                                 "with transformers >= 5.2)[/]"
                             )
                     else:
-                        raise ValueError(
-                            f"Unknown fp8_handling mode: {handling!r}"
-                        )
+                        raise ValueError(f"Unknown fp8_handling mode: {handling!r}")
 
                     if direct and handling == "forward_dequant":
                         print(

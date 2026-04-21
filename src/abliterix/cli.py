@@ -839,12 +839,11 @@ def run():
 
                             _auto_cfg = AutoConfig.from_pretrained(
                                 config.model.model_id,
-                                trust_remote_code=config.model.trust_remote_code or False,
+                                trust_remote_code=config.model.trust_remote_code
+                                or False,
                             )
                             _text_cfg = getattr(_auto_cfg, "text_config", _auto_cfg)
-                            _top_k = int(
-                                getattr(_text_cfg, "num_experts_per_tok", 4)
-                            )
+                            _top_k = int(getattr(_text_cfg, "num_experts_per_tok", 4))
                         except Exception:
                             _top_k = 4
 
@@ -884,7 +883,7 @@ def run():
                         f"* Attaching MoE router editor ({len(safety_experts)} "
                         f"MoE layers)..."
                     )
-                    tp_gen.set_moe_editor(safety_experts)
+                    tp_gen.set_moe_editor(safety_experts)  # ty:ignore[call-non-callable]
 
             # In-place editing path: attach expert + attention editors so the
             # optimizer trial loop edits vLLM weights directly (no LoRA adapter).
@@ -905,15 +904,18 @@ def run():
                 if _hidden is None:
                     try:
                         from transformers import AutoConfig as _AC
+
                         _c = _AC.from_pretrained(
                             config.model.model_id,
                             trust_remote_code=config.model.trust_remote_code or False,
                         )
-                        _hidden = int(getattr(
-                            getattr(_c, "text_config", _c),
-                            "hidden_size",
-                            0,
-                        ))
+                        _hidden = int(
+                            getattr(
+                                getattr(_c, "text_config", _c),
+                                "hidden_size",
+                                0,
+                            )
+                        )
                     except Exception:
                         _hidden = 0
                 if _hidden > 0:
@@ -921,10 +923,10 @@ def run():
                         f"* Attaching vLLM in-place editors "
                         f"(hidden={_hidden}, transposed={_transposed})..."
                     )
-                    tp_gen.set_expert_editor(
+                    tp_gen.set_expert_editor(  # ty:ignore[call-non-callable]
                         hidden_dim=_hidden, transposed=_transposed
                     )
-                    tp_gen.set_attention_editor()
+                    tp_gen.set_attention_editor()  # ty:ignore[call-non-callable]
                 else:
                     print(
                         "  [yellow]use_in_place_editing=true but hidden_size "
@@ -973,7 +975,10 @@ def run():
                 and len(getattr(tp_gen.attention_editor, "_attn_layers", set())) > 0
             ):
                 _attn_needed = {
-                    "attn.q_proj", "attn.k_proj", "attn.v_proj", "attn.o_proj",
+                    "attn.q_proj",
+                    "attn.k_proj",
+                    "attn.v_proj",
+                    "attn.o_proj",
                 }
                 _attn_missing = _attn_needed - set(engine._cached_components)
                 if _attn_missing:

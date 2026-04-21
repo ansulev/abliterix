@@ -219,9 +219,7 @@ class VLLMGenerator:
         try:
             self.moe_editor._ensure_installed()
         except Exception as exc:  # pragma: no cover — defensive
-            print(
-                f"  [yellow]Warning: persistent suppression install failed: {exc}[/]"
-            )
+            print(f"  [yellow]Warning: persistent suppression install failed: {exc}[/]")
 
     def apply_router_suppression(self, n_suppress: int, bias_value: float) -> int:
         """Scale down the router weight rows of the top-N safety experts
@@ -602,6 +600,7 @@ class VLLMGenerator:
 
         vocab_size = self.llm.llm_engine.model_config.get_vocab_size()
         import math
+
         uniform_lp = math.log(1.0 / vocab_size)
 
         for out in outputs:
@@ -891,9 +890,7 @@ class ProjectionCache:
                 # For MoE mlp.down_proj the component holds ONE entry per
                 # expert — stored as a list under "experts" rather than as
                 # a single module, so build_lora_weights can iterate all.
-                is_moe_expert_down = (
-                    component == "mlp.down_proj" and len(keys) > 1
-                )
+                is_moe_expert_down = component == "mlp.down_proj" and len(keys) > 1
                 entries: list[dict] = []
 
                 for wkey in keys:
@@ -1196,9 +1193,7 @@ class ProjectionCache:
 
         _ZERO_COMPANIONS = {"moe.expert_gate", "moe.expert_up"}
 
-        def _one_projection(
-            info: dict, strength: float
-        ) -> tuple[Tensor, Tensor]:
+        def _one_projection(info: dict, strength: float) -> tuple[Tensor, Tensor]:
             """Compute (lora_A, lora_B) for a single real-steering module.
 
             Dispatches on ``info["direction"]`` to produce the correct rank-1
@@ -1289,12 +1284,8 @@ class ProjectionCache:
                 if companion_info is None:
                     continue
                 for c in companion_info["companions"]:
-                    lora_A_zero = torch.zeros(
-                        1, c["d_in"], dtype=torch.float32
-                    )
-                    lora_B_zero = torch.zeros(
-                        c["d_out"], 1, dtype=torch.float32
-                    )
+                    lora_A_zero = torch.zeros(1, c["d_in"], dtype=torch.float32)
+                    lora_B_zero = torch.zeros(c["d_out"], 1, dtype=torch.float32)
                     lora_weights[c["module_path"]] = (lora_A_zero, lora_B_zero)
 
         return lora_weights

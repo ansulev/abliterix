@@ -48,11 +48,11 @@ if TYPE_CHECKING:
 # module (which has a ``.weight`` tensor of shape ``(num_experts, hidden)``).
 # Order matters — first match wins.
 _ROUTER_PATHS: tuple[str, ...] = (
-    "mlp.router",              # gpt-oss (ReplicatedLinear)
-    "mlp.gate",                # Qwen3 MoE, DeepSeek MoE
-    "block_sparse_moe.gate",   # Mixtral, Phi-3.5-MoE
-    "moe.gate",                # some variants
-    "mixer.gate",              # LiquidAI / hybrid
+    "mlp.router",  # gpt-oss (ReplicatedLinear)
+    "mlp.gate",  # Qwen3 MoE, DeepSeek MoE
+    "block_sparse_moe.gate",  # Mixtral, Phi-3.5-MoE
+    "moe.gate",  # some variants
+    "mixer.gate",  # LiquidAI / hybrid
 )
 
 
@@ -75,6 +75,7 @@ def _worker_resolve_model(worker: Any):
     # Llama-4, etc.). Also handles the simple case where `top.model.layers`
     # is the decoder (GptOss, Qwen3, Llama).
     import collections as _c
+
     q: _c.deque = _c.deque([(top, 0)])
     seen = {id(top)}
     while q:
@@ -94,8 +95,7 @@ def _worker_resolve_model(worker: Any):
             seen.add(id(child))
             q.append((child, depth + 1))
     raise RuntimeError(
-        f"Cannot locate decoder with .layers on worker model "
-        f"(top={type(top).__name__})"
+        f"Cannot locate decoder with .layers on worker model (top={type(top).__name__})"
     )
 
 
@@ -494,8 +494,10 @@ def profile_safety_experts_vllm(
     engine.collective_rpc(_worker_remove_router_hooks)
 
     if not results:
-        print("  [yellow]profile_safety_experts_vllm: workers returned "
-              "no results — router probably never fired[/]")
+        print(
+            "  [yellow]profile_safety_experts_vllm: workers returned "
+            "no results — router probably never fired[/]"
+        )
         return {}
 
     r = results[0]
@@ -713,7 +715,7 @@ class VLLMMoEEditor:
         for layer_idx, ranking in self.safety_experts.items():
             if layer_idx not in self._router_layers:
                 continue
-            eids = [int(eid) for eid, _score in ranking[: n_suppress]]
+            eids = [int(eid) for eid, _score in ranking[:n_suppress]]
             if not eids:
                 continue
             plan_by_layer[layer_idx] = (eids, [penalty] * len(eids))
@@ -770,10 +772,10 @@ def _worker_locate_moe_experts(layer_module: Any):
     ``FusedMoE`` instance holding ``w2_weight`` (fused expert down_proj).
     """
     _MOE_PATHS = (
-        "mlp.experts",              # gpt-oss (FusedMoE under MLPBlock)
-        "mlp.experts.experts",      # some wrappers
-        "block_sparse_moe.experts", # Mixtral variant
-        "moe.experts",              # generic
+        "mlp.experts",  # gpt-oss (FusedMoE under MLPBlock)
+        "mlp.experts.experts",  # some wrappers
+        "block_sparse_moe.experts",  # Mixtral variant
+        "moe.experts",  # generic
     )
     for path in _MOE_PATHS:
         obj = layer_module
@@ -799,9 +801,7 @@ def _worker_probe_experts(worker: Any) -> dict[str, Any]:
             per_layer.append((idx, None, None, None))
             continue
         w2 = moe.w2_weight
-        per_layer.append(
-            (idx, path, tuple(w2.shape), str(w2.dtype))
-        )
+        per_layer.append((idx, path, tuple(w2.shape), str(w2.dtype)))
     return {"n_layers": len(layers), "per_layer": per_layer}
 
 
@@ -892,9 +892,7 @@ def _worker_apply_ega_batch(
         hidden_dim = int(entry["hidden_dim"])
         try:
             v_bytes = entry["v"]
-            v = torch.load(
-                io.BytesIO(v_bytes), map_location="cpu", weights_only=True
-            )
+            v = torch.load(io.BytesIO(v_bytes), map_location="cpu", weights_only=True)
         except Exception as e:
             errors.append(f"layer {idx}: deserialize v failed: {e}")
             continue
@@ -953,17 +951,17 @@ def _worker_apply_ega_batch(
         with torch.no_grad():
             W_all = w2.data.to(torch.float32)  # (E, d0, d1)
             if axis_is_in:
-                proj = torch.matmul(W_all, vf)                          # (E, d0)
+                proj = torch.matmul(W_all, vf)  # (E, d0)
                 W_new = W_all - strength * (proj.unsqueeze(-1) * vf.view(1, 1, -1))
             else:
-                proj = torch.einsum("o,eoi->ei", vf, W_all)             # (E, d1)
+                proj = torch.einsum("o,eoi->ei", vf, W_all)  # (E, d1)
                 W_new = W_all - strength * (vf.view(1, -1, 1) * proj.unsqueeze(1))
 
             if norm_preserve:
                 orig_norms = torch.linalg.vector_norm(W_all, dim=-1, keepdim=True)
-                new_norms = torch.linalg.vector_norm(
-                    W_new, dim=-1, keepdim=True
-                ).clamp(min=1e-8)
+                new_norms = torch.linalg.vector_norm(W_new, dim=-1, keepdim=True).clamp(
+                    min=1e-8
+                )
                 W_new = W_new * (orig_norms / new_norms)
 
             w2.data.copy_(W_new.to(w2.dtype))
@@ -1136,9 +1134,9 @@ class VLLMExpertEditor:
 
 
 _ATTN_PATHS: tuple[str, ...] = (
-    "self_attn",              # gpt-oss, Qwen3, Llama, Mixtral
-    "attention",              # some variants
-    "attn",                   # some others
+    "self_attn",  # gpt-oss, Qwen3, Llama, Mixtral
+    "attention",  # some variants
+    "attn",  # some others
 )
 
 
@@ -1166,8 +1164,9 @@ def _worker_probe_attention(worker: Any) -> dict[str, Any]:
     """Diagnostic: report attention module locations + shapes."""
     decoder = _worker_resolve_model(worker)
     layers = decoder.layers
-    per_layer: list[tuple[int, str | None, tuple[int, ...] | None,
-                           tuple[int, ...] | None, int, int]] = []
+    per_layer: list[
+        tuple[int, str | None, tuple[int, ...] | None, tuple[int, ...] | None, int, int]
+    ] = []
     for idx, layer in enumerate(layers):
         attn, path = _worker_locate_attention(layer)
         if attn is None:
@@ -1251,10 +1250,10 @@ def _project_2d(
     out_f, in_f = W32.shape
     v = vf
     if v.shape[0] == out_f:
-        proj = v @ W32                         # (in_f,)
+        proj = v @ W32  # (in_f,)
         W_new = W32 - strength * v.unsqueeze(1) * proj.unsqueeze(0)
     elif v.shape[0] == in_f:
-        proj = W32 @ v                         # (out_f,)
+        proj = W32 @ v  # (out_f,)
         W_new = W32 - strength * proj.unsqueeze(1) * v.unsqueeze(0)
     else:
         raise ValueError(
@@ -1454,9 +1453,7 @@ class VLLMAttentionEditor:
         needed = sorted({int(p["layer_idx"]) for p in plan})
         self.backup(needed)
 
-        results = self._rpc(
-            _worker_apply_attn_batch, args=(plan, bool(norm_preserve))
-        )
+        results = self._rpc(_worker_apply_attn_batch, args=(plan, bool(norm_preserve)))
         self._applied = True
         if not results:
             return {"applied": 0, "errors": ["no workers"], "per_layer": []}

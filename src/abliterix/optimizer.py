@@ -203,6 +203,7 @@ def run_search(
 
         if _in_place_mode:
             from .core.steering import apply_steering_vllm_inplace
+
             # Resolve n_layers + hidden_dim from the attention editor's
             # probe, falling back to config.
             _probe_layers = sorted(

@@ -419,16 +419,20 @@ def apply_steering(
                         W = engine._dequant_cache[mid]
                     else:
                         from . import fp8_utils as _fp8
+
                         scale_inv = getattr(mod.base_layer, "weight_scale_inv", None)
                         if isinstance(scale_inv, Tensor) and scale_inv.dim() == 2:
                             W = _fp8.dequant_blockwise(
-                                base_weight.data, scale_inv, is_inv=True,
+                                base_weight.data,
+                                scale_inv,
+                                is_inv=True,
                                 out_dtype=torch.float32,
                             )
                         else:
                             scale = getattr(mod.base_layer, "weight_scale", None)
                             W = _fp8.dequant_per_tensor(
-                                base_weight.data, scale,
+                                base_weight.data,
+                                scale,
                                 out_dtype=torch.float32,
                             )
                         engine._dequant_cache[mid] = W
@@ -771,6 +775,7 @@ def _apply_ega_steering(
 def _save_vec_bytes(v: Tensor) -> bytes:
     """Serialize a 1-D steering vector for collective_rpc transport."""
     import io
+
     buf = io.BytesIO()
     torch.save(v.detach().to(dtype=torch.float32, device="cpu"), buf)
     return buf.getvalue()
@@ -835,12 +840,14 @@ def _apply_direct_steering_vllm(
             else:
                 v_layer = global_vector
 
-            plan.append({
-                "layer_idx": layer_idx,
-                "component": component,
-                "v": _save_vec_bytes(v_layer),
-                "strength": float(strength),
-            })
+            plan.append(
+                {
+                    "layer_idx": layer_idx,
+                    "component": component,
+                    "v": _save_vec_bytes(v_layer),
+                    "strength": float(strength),
+                }
+            )
 
     if not plan:
         return {"applied": 0, "errors": [], "per_layer": []}
@@ -879,13 +886,15 @@ def _apply_ega_steering_vllm(
         else:
             v_layer = global_vector
 
-        plan.append({
-            "layer_idx": layer_idx,
-            "v": _save_vec_bytes(v_layer),
-            "strength": float(strength),
-            "hidden_dim": hidden_dim,
-            "transposed": transposed,
-        })
+        plan.append(
+            {
+                "layer_idx": layer_idx,
+                "v": _save_vec_bytes(v_layer),
+                "strength": float(strength),
+                "hidden_dim": hidden_dim,
+                "transposed": transposed,
+            }
+        )
 
     if not plan:
         return {"applied": 0, "errors": [], "per_layer": []}
@@ -923,16 +932,28 @@ def apply_steering_vllm_inplace(
             steering_vectors[int(integral)].lerp(
                 steering_vectors[int(integral) + 1], fractional
             ),
-            p=2, dim=0,
+            p=2,
+            dim=0,
         )
 
     attn_result = _apply_direct_steering_vllm(
-        vllm_gen, steering_vectors, global_vector, profiles, config,
-        n_layers=n_layers, discriminative_layers=None,
+        vllm_gen,
+        steering_vectors,
+        global_vector,
+        profiles,
+        config,
+        n_layers=n_layers,
+        discriminative_layers=None,
     )
     ega_result = _apply_ega_steering_vllm(
-        vllm_gen, steering_vectors, global_vector, profiles, config,
-        n_layers=n_layers, hidden_dim=hidden_dim, transposed=transposed,
+        vllm_gen,
+        steering_vectors,
+        global_vector,
+        profiles,
+        config,
+        n_layers=n_layers,
+        hidden_dim=hidden_dim,
+        transposed=transposed,
         discriminative_layers=None,
     )
 

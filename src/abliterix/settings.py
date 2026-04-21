@@ -91,6 +91,18 @@ class ModelConfig(BaseModel):
         ),
     )
 
+    experts_implementation: str | None = Field(
+        default=None,
+        description=(
+            "MoE experts kernel: 'eager', 'grouped_mm', 'batched_mm', 'deepgemm'.  "
+            "transformers 5.x defaults to 'grouped_mm' which calls torch._grouped_mm — "
+            "that op is hard-pinned to compute capability sm_90 (H100) in torch 2.8 "
+            "and raises on Blackwell (sm_100/sm_120 — B200, RTX Pro 6000) and on "
+            "Ampere/Ada (A100, A6000, RTX 4090). On those cards, set this to 'eager' "
+            "or 'batched_mm'. None (default) lets transformers pick."
+        ),
+    )
+
     skip_fp8_dequant: bool | None = Field(
         default=None,
         description=(
@@ -108,6 +120,25 @@ class ModelConfig(BaseModel):
             "Required for some MoE models (Qwen3.5 MoE) to fix weight_scale_inv "
             "shape mismatches with device_map='auto'.  "
             "None = auto-detect from model config."
+        ),
+    )
+
+    fp8_handling: str = Field(
+        default="auto",
+        description=(
+            "How to handle native-FP8 model weights at load time.\n"
+            "  'auto'              — decide from steering_mode: materialise BF16 "
+            "for direct/EGA, forward-dequant for LoRA\n"
+            "  'materialize'       — replace every FP8 weight with a BF16 "
+            "Parameter (2x VRAM; required for direct-mode weight editing; "
+            "unfuses transformers FP8Experts back to per-expert modules)\n"
+            "  'forward_dequant'   — monkey-patch FP8 Linear.forward for "
+            "on-the-fly bf16 dequant (1x VRAM; LoRA-mode only; fails on "
+            "fused MoE FP8 containers)\n"
+            "  'offline'           — assume the model has been pre-dequanted "
+            "to disk via abliterix.core.fp8_utils.dequant_model_to_disk; skip "
+            "all FP8 paths\n"
+            "See abliterix.core.fp8_utils for the underlying kernels."
         ),
     )
 
@@ -172,6 +203,39 @@ class ModelConfig(BaseModel):
             "Force eager mode in vLLM (disable CUDA graphs).  "
             "Safer for debugging but slower.  Default False enables CUDA graphs "
             "for ~10-20%% higher throughput."
+        ),
+    )
+
+    disable_lora: bool = Field(
+        default=False,
+        description=(
+            "Force vLLM to load without LoRA support (enable_lora=False).  "
+            "Required for MXFP4 models on older drivers: vLLM's Marlin-FP4 LoRA "
+            "repack kernel ships CUDA 12.9+ PTX that fails on driver < 575 with "
+            "cudaErrorUnsupportedPtxVersion.  When set, the optimizer still runs "
+            "MoE router suppression on mlp.router.weight (the primary MoE steering "
+            "mechanism) but skips attention LoRA adapters — acceptable loss for "
+            "gpt-oss-style models where q/k/v LoRA is already disabled and only "
+            "o_proj would have been steered."
+        ),
+    )
+
+    use_in_place_editing: bool = Field(
+        default=False,
+        description=(
+            "Skip the LoRA-adapter path and edit vLLM weights in-place via "
+            "``collective_rpc`` instead.  Requires an unquantized BF16 MoE "
+            "checkpoint (MXFP4 / FP8 repack is NOT supported — see "
+            "``Mxfp4MoEMethod.process_weights_after_loading``) and "
+            "``enforce_eager = true``.  Advantages over LoRA adapter path:\n"
+            "  * Edits attention + ALL experts + router every trial; LoRA "
+            "    adapter covers attention only.\n"
+            "  * No adapter serialisation overhead (~200 MB / trial saved).\n"
+            "  * 3x GPU util on TP vs HF pipeline-parallel.\n"
+            "Caller must also export ``VLLM_FUSED_MOE_UNQUANTIZED_BACKEND="
+            "triton`` + ``VLLM_ALLOW_INSECURE_SERIALIZATION=1`` before engine "
+            "load — FLASHINFER_TRTLLM backend repacks w2_weight into an "
+            "opaque block layout that in-place writes miss."
         ),
     )
 
@@ -342,6 +406,20 @@ class SteeringConfig(BaseModel):
             '``"attn.q_proj"``). Useful for high-dimensional MoE models where '
             "attention-side steering wastes trial budget that should go to "
             "expert-path components."
+        ),
+    )
+
+    fixed_vector_scope: str | None = Field(
+        default=None,
+        description=(
+            "Pin the vector scope to one of ``\"global\"`` or ``\"per layer\"`` "
+            "instead of letting TPE sample between them. When set, the "
+            "categorical suggestion is replaced with a single-choice categorical "
+            "so TPE's parameter space stays valid but can only pick this scope. "
+            "Useful when domain knowledge says one scope dominates (e.g. deep "
+            "MoE models benefit from ``per layer`` because refusal circuits "
+            "differ across layers, and a single global direction averages them "
+            "into a less-aligned vector)."
         ),
     )
 

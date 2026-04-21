@@ -21,6 +21,38 @@ HF_TOKEN = os.environ.get("HUGGING_FACE_TOKEN") or os.environ.get("HF_TOKEN", ""
 
 MODELS = [
     {
+        "repo_id": "wangzhang/gemma-4-26B-A4B-it-abliterix",
+        "base_model": "google/gemma-4-26B-A4B-it",
+        "model_name": "gemma-4-26B-A4B",
+        "refusals": 2,
+        "total": 100,
+        "kl": 0.0005,
+        "trials": 80,
+        "highlight": (
+            "Google's Gemma 4 26B-A4B (128-expert MoE, thinking model) abliterated via "
+            "projected abliteration + sharp-peak EGA + MoE router suppression (V6 recipe). "
+            "**2/100 refusals (2%)** with a remarkably low KL divergence of **0.0005** \u2014 "
+            "model quality is virtually unchanged while safety refusals nearly disappear. "
+            "Beats the prior best known result (TrevorS 3/100) on this exact model."
+        ),
+        "usage_snippet": """\
+```python
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+model = AutoModelForCausalLM.from_pretrained(
+    "wangzhang/gemma-4-26B-A4B-it-abliterix", torch_dtype="auto", device_map="auto",
+    attn_implementation="eager",  # required for Gemma-4 MoE on Blackwell/sm_120
+)
+tokenizer = AutoTokenizer.from_pretrained("wangzhang/gemma-4-26B-A4B-it-abliterix")
+
+messages = [{"role": "user", "content": "Your question here"}]
+text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+inputs = tokenizer(text, return_tensors="pt").to(model.device)
+outputs = model.generate(**inputs, max_new_tokens=512)
+print(tokenizer.decode(outputs[0], skip_special_tokens=True))
+```""",
+    },
+    {
         "repo_id": "wangzhang/Qwen3.5-122B-A10B-abliterated",
         "base_model": "Qwen/Qwen3.5-122B-A10B",
         "model_name": "Qwen3.5-122B-A10B",
@@ -99,17 +131,37 @@ MODELS = [
             "scales down effectively."
         ),
     },
+    {
+        "repo_id": "wangzhang/gpt-oss-20b-abliterated",
+        "base_model": "openai/gpt-oss-20b",
+        "model_name": "gpt-oss-20b",
+        "refusals": 6,
+        "total": 100,
+        "kl": 0.0098,
+        "trials": 100,
+        "highlight": (
+            "OpenAI's gpt-oss-20b MoE (32 experts, top-4) abliterated via the "
+            "combined EGA + MoE router-suppression recipe. Native MXFP4 weights "
+            "are dequantized to BF16 at load time so the fused expert "
+            "`down_proj` (128\u00d72880\u00d72880) can be edited in place. "
+            "Refusal rate dropped from 97/100 baseline to **6/100** with KL "
+            "divergence **0.0098** \u2014 normal-prompt quality preserved while "
+            "harmful-prompt refusals collapse."
+        ),
+    },
 ]
 
 ALL_MODELS_TABLE = """\
 | Model | Refusals | KL Divergence | Trials |
 |-------|----------|---------------|--------|
+| [gemma-4-26B-A4B-it-abliterix](https://huggingface.co/wangzhang/gemma-4-26B-A4B-it-abliterix) | **2/100 (2%)** | **0.0005** | 80 |
 | [Qwen3.5-122B-A10B-abliterated](https://huggingface.co/wangzhang/Qwen3.5-122B-A10B-abliterated) | **1/200 (0.5%)** | 0.0115 | 25 |
-| [Qwen3.5-35B-A3B-abliterated](https://huggingface.co/wangzhang/Qwen3.5-35B-A3B-abliterated) | 3/200 (1.5%) | **0.0035** | 50 |
+| [Qwen3.5-35B-A3B-abliterated](https://huggingface.co/wangzhang/Qwen3.5-35B-A3B-abliterated) | 3/200 (1.5%) | 0.0035 | 50 |
 | [Qwen3.5-27B-abliterated](https://huggingface.co/wangzhang/Qwen3.5-27B-abliterated) | 3/200 (1.5%) | 0.0051 | 35 |
 | [Qwen3.5-9B-abliterated](https://huggingface.co/wangzhang/Qwen3.5-9B-abliterated) | 2/200 (1%) | 0.0105 | 50 |
 | [Qwen3.5-4B-abliterated](https://huggingface.co/wangzhang/Qwen3.5-4B-abliterated) | 3/200 (1.5%) | 0.0065 | 50 |
-| [Qwen3.5-0.8B-abliterated](https://huggingface.co/wangzhang/Qwen3.5-0.8B-abliterated) | **0/200 (0%)** | 0.0087 | 100 |"""
+| [Qwen3.5-0.8B-abliterated](https://huggingface.co/wangzhang/Qwen3.5-0.8B-abliterated) | **0/200 (0%)** | 0.0087 | 100 |
+| [gpt-oss-20b-abliterated](https://huggingface.co/wangzhang/gpt-oss-20b-abliterated) | 6/100 (6%) | 0.0098 | 100 |"""
 
 
 def build_card(m: dict) -> ModelCard:
@@ -131,6 +183,22 @@ def build_card(m: dict) -> ModelCard:
         refusal_str = f"**{refusals}/{total} ({int(pct)}%)**"
     else:
         refusal_str = f"**{refusals}/{total} ({pct:.1f}%)**"
+
+    if "usage_snippet" in m:
+        usage_block = m["usage_snippet"]
+    else:
+        usage_block = (
+            "```python\n"
+            "from transformers import AutoModelForCausalLM, AutoTokenizer\n\n"
+            f'model = AutoModelForCausalLM.from_pretrained("{m["repo_id"]}", torch_dtype="auto", device_map="auto")\n'
+            f'tokenizer = AutoTokenizer.from_pretrained("{m["repo_id"]}")\n\n'
+            'messages = [{"role": "user", "content": "Your question here"}]\n'
+            "text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True, enable_thinking=False)\n"
+            "inputs = tokenizer(text, return_tensors=\"pt\").to(model.device)\n"
+            "outputs = model.generate(**inputs, max_new_tokens=512)\n"
+            "print(tokenizer.decode(outputs[0], skip_special_tokens=True))\n"
+            "```"
+        )
 
     text = f"""\
 # {m["model_name"]}-abliterated
@@ -162,18 +230,7 @@ Abliterix removes safety-refusal behavior while preserving model capabilities:
 
 ## Usage
 
-```python
-from transformers import AutoModelForCausalLM, AutoTokenizer
-
-model = AutoModelForCausalLM.from_pretrained("{m["repo_id"]}", torch_dtype="auto", device_map="auto")
-tokenizer = AutoTokenizer.from_pretrained("{m["repo_id"]}")
-
-messages = [{{"role": "user", "content": "Your question here"}}]
-text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True, enable_thinking=False)
-inputs = tokenizer(text, return_tensors="pt").to(model.device)
-outputs = model.generate(**inputs, max_new_tokens=512)
-print(tokenizer.decode(outputs[0], skip_special_tokens=True))
-```
+{usage_block}
 
 ## Citation
 

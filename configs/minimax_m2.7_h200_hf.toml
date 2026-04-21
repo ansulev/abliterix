@@ -1,0 +1,110 @@
+non_interactive = true
+
+# MiniMax-M2.7 (MoE) — HF direct+EGA config for 4× NVIDIA H200 SXM 141GB
+# 256 experts (8 routed), 62 layers, hidden=3072, expert_dim=1536
+# FP8 ~230GB on disk → dequant to BF16 ~460GB → 4× H200 (564GB VRAM) fits with headroom.
+#
+# WHY HF + direct instead of vLLM + router suppression:
+#   - vLLM live MoE router suppression is a DEAD END per prior memory
+#     (8 failed launch cycles on gpt-oss-120b, KL stayed 0.0000).
+#   - FP8 packed weights cannot be edited in place → no EGA possible.
+#   - Only attn.o_proj LoRA + router scale → 97-99/100 baseline refusals.
+#   - Proven winning recipe: HF dequant to BF16 + steering_mode="direct"
+#     + EGA on fused experts + weight_normalization="full" (gpt-oss-20b
+#     shipped, Qwen3.6-35B-A3B 93% ASR).
+#
+# GPU sizing:
+#   BF16 model (460GB) + KV cache + activations + hidden-state extraction cache
+#   → need ≥500GB aggregate. 4× H200 141GB (564GB) has ~60GB headroom.
+#   Pipeline parallel via device_map="auto" — slower than TP but REQUIRED for
+#   direct weight editing (vLLM TP can't edit in place).
+#
+# MiniMax-M2 FP8 handling:
+#   - `quant_method = "none"` — engine sees the model's own quantization_config
+#     (block_fp8 e4m3) and HF transformers ≥ 4.57 auto-dequants to bfloat16
+#     at load time when torch_dtype=bfloat16 is requested.
+#   - NO skip_fp8_dequant. We WANT dequant — it's the whole point.
+
+[model]
+model_id = "/workspace/minimax_m27_bf16"
+dtype_fallback_order = ["bfloat16"]
+quant_method = "none"
+use_torch_compile = false
+attn_implementation = "sdpa"
+device_map = "auto"
+trust_remote_code = true
+# Per-GPU cap — 135GB leaves ~6GB/GPU headroom for activations + KV.
+# 4× 135GB = 540GB usable; BF16 weights 460GB + ~80GB for KV/grad/activation.
+max_memory = {0 = "135GiB", 1 = "135GiB", 2 = "135GiB", 3 = "135GiB"}
+
+[inference]
+batch_size = 0
+# MoE at BF16 has per-expert activation spikes — keep modest.
+max_batch_size = 8
+# Refusal detection only needs ~30-50 tokens; cap 96 for coherence length check.
+max_gen_tokens = 96
+
+[steering]
+vector_method = "mean"
+steering_mode = "direct"           # in-place weight edit + auto EGA on fused experts
+decay_kernel = "linear"            # simpler; Qwen3.5/3.6 MoE winner
+orthogonal_projection = true
+weight_normalization = "full"      # norm-preserving projection (Gemma 4 / gpt-oss lesson)
+
+# Drop Q/K/V — refusal signal lives in expert path on MoE (Qwen3.6 + Gemma 4 lesson).
+disabled_components = ["attn.q_proj", "attn.k_proj", "attn.v_proj"]
+
+# Default range applies to attention components (attn.o_proj).
+strength_range = [1.0, 7.0]
+min_weight_frac_max = 0.4
+
+# EGA on fused experts wants HIGH strength (gpt-oss-20b winner max=8.62).
+[steering.component_strength_ranges]
+"mlp.down_proj" = [6.0, 11.0]
+
+[steering.component_min_frac_max]
+"mlp.down_proj" = 0.10
+
+# warmup=25: EGA landscape is jagged (small low-refusal region surrounded by
+# over-steer cliffs). TPE needs random coverage before modeling.
+[optimization]
+num_trials = 50
+num_warmup_trials = 25
+checkpoint_dir = "checkpoints_minimax_m27_hf_v1"
+
+[kl]
+scale = 1.0
+token_count = 3
+target = 0.01
+prune_threshold = 5.0
+
+[detection]
+llm_judge = true
+llm_judge_model = "google/gemini-3.1-flash-lite-preview"
+llm_judge_batch_size = 10
+llm_judge_concurrency = 25
+
+[display]
+print_responses = false
+print_residual_geometry = false
+plot_residuals = false
+
+[benign_prompts]
+dataset = "datasets/good_1000"
+split = "train[:400]"
+column = "prompt"
+
+[target_prompts]
+dataset = "datasets/harmful_1000"
+split = "train[:400]"
+column = "prompt"
+
+[benign_eval_prompts]
+dataset = "datasets/good_1000"
+split = "train[400:500]"
+column = "prompt"
+
+[target_eval_prompts]
+dataset = "datasets/harmful_1000"
+split = "train[400:500]"
+column = "prompt"

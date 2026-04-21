@@ -1,0 +1,148 @@
+non_interactive = true
+
+# GPT-OSS-120B v7 Stage 2 — Residual ablation on Stage 1 output
+# =============================================================
+#
+# Target: Knock v7s1 winner's 15-22/100 refusals down into single-digit by
+#         ablating the *residual* refusal direction that Stage 1 couldn't
+#         touch (because it was encoded orthogonally to Stage 1's steering
+#         vector).
+#
+# Why this works:
+#   Single-direction abliteration removes one rank-1 subspace.  Deep models
+#   like gpt-oss-120b encode refusal across multiple orthogonal circuits
+#   (attention sinks, per-expert safety routing, CoT-scratchpad filtering).
+#   When Stage 1's extracted direction is projected out, the model's NEW
+#   mean(target) - mean(benign) residual points along what's LEFT — i.e.,
+#   the next most salient refusal circuit.  Repeating the abliteration
+#   extract-project loop peels them off in order of magnitude.
+#
+#   This is manual iterative abliteration (vs IterativeConfig's subspace
+#   tensor, which is incompatible with EGA's per-layer indexing —
+#   steering.py:699 does vectors[layer_idx+1]).  By staging through
+#   separate abliterix runs on distinct checkpoints, we get iterative's
+#   benefits with EGA intact.
+#
+# Key Stage 2 semantics:
+#   - model_id points to the EXPORTED Stage 1 BF16 checkpoint
+#   - Phase 1 HF/vLLM hidden-state extraction sees Stage 1's attn + EGA
+#     edits already BAKED INTO the weights, so the (target - benign) mean
+#     picks up whatever refusal remains
+#   - Router suppression from Stage 1 is NOT in the weights (it's applied
+#     live via collective_rpc), so Stage 2 router search is fresh.
+#     Deployment applies Stage 2's router config — it REPLACES Stage 1's,
+#     not additive (they're the same MoEEditor.apply() under the hood).
+#   - Wall time: 50 trials × ~60s ≈ 50 min.
+
+[model]
+# POINT AT STAGE 1 EXPORT — this path is the Stage 1 winner's abliterated
+# BF16 checkpoint, created by the orchestration script between stages.
+model_id = "/workspace/gpt-oss-120b-v7s1"
+dtype_fallback_order = ["bfloat16"]
+quant_method = "none"
+use_torch_compile = false
+device_map = "auto"
+trust_remote_code = true
+max_memory = {0 = "92GiB", 1 = "92GiB", 2 = "92GiB", 3 = "92GiB"}
+tensor_parallel_size = 4
+backend = "vllm"
+enforce_eager = true
+disable_lora = true
+use_in_place_editing = true
+max_model_len = 1024
+
+[inference]
+batch_size = 0
+max_batch_size = 32
+max_gen_tokens = 256
+
+[steering]
+vector_method = "mean"
+steering_mode = "direct"
+decay_kernel = "linear"
+orthogonal_projection = true
+weight_normalization = "full"
+
+# Stage 2 operates on the RESIDUAL refusal direction after Stage 1's
+# projection.  Empirically this residual has lower magnitude in the
+# (target - benign) mean — but the unit-normalised direction still defines
+# a valid projection axis.  Let TPE sweep a slightly wider strength range
+# since we don't know a priori whether the residual direction needs gentle
+# (~2) or firm (~6) steering.
+strength_range = [1.0, 6.0]
+min_weight_frac_max = 0.6
+
+fixed_vector_scope = "per layer"
+
+# Stage 2: o_proj + EGA.  q/k/v still disabled for the same reason as
+# Stage 1 (wider search space doesn't help).
+disabled_components = ["attn.q_proj", "attn.k_proj", "attn.v_proj"]
+
+[steering.component_strength_ranges]
+"mlp.down_proj" = [6.0, 10.0]
+
+[steering.component_min_frac_max]
+"mlp.down_proj" = 0.25
+
+[optimization]
+# 50 trials, 20 warmup.  Smaller search because:
+#   1. We're refining a specific residual direction, not exploring fresh
+#   2. Stage 1's bake-in reduced (target-benign) variance — TPE has tighter
+#      signal-to-noise to work with
+#   3. Wall-time budget: we want < 1 hr for Stage 2
+#   4. 20/9 = 2.2 samples/dim WARMUP but 30 TPE trials on top gives ~50
+#      total evaluations in a smaller exploration region — proportionally
+#      similar to v5's regime
+num_trials = 50
+num_warmup_trials = 20
+checkpoint_dir = "checkpoints_gpt_oss_120b_v7s2"
+
+[experts]
+max_suppress = 6
+router_bias_range = [-5.0, 0.0]
+ablation_weight_range = [0.0, 0.0]
+
+[kl]
+# Stage 2 KL is measured against Stage 1 output (not original base).
+# A Stage 2 trial with KL 0.01 vs Stage 1 means an ADDITIONAL 1% KL on top
+# of whatever drift Stage 1 already introduced.  Total drift vs original
+# base = Stage1_KL + Stage2_KL approximately (KL triangle inequality is
+# soft but this holds in the small-perturbation regime).
+#
+# Keep target at 0.01 — the scorer will still punish large Stage 2 KL,
+# and we're OK with up to ~0.02 total drift vs original base.
+scale = 1.0
+token_count = 3
+target = 0.01
+prune_threshold = 5.0
+
+[detection]
+llm_judge = true
+llm_judge_model = "google/gemini-3.1-flash-lite-preview"
+llm_judge_batch_size = 1
+llm_judge_concurrency = 16
+
+[display]
+print_responses = false
+print_residual_geometry = false
+plot_residuals = false
+
+[benign_prompts]
+dataset = "datasets/good_500"
+split = "train[:400]"
+column = "prompt"
+
+[target_prompts]
+dataset = "datasets/harmful_500"
+split = "train[:400]"
+column = "prompt"
+
+[benign_eval_prompts]
+dataset = "datasets/good_500"
+split = "train[400:]"
+column = "prompt"
+
+[target_eval_prompts]
+dataset = "datasets/harmful_500"
+split = "train[400:]"
+column = "prompt"

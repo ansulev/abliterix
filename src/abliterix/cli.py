@@ -221,7 +221,16 @@ def _speculators_available() -> bool:
 
 
 def _vllm_hidden_states_available() -> bool:
-    """Check if vLLM's native hidden state extraction API is available (>= 0.17)."""
+    """Check if vLLM's native hidden state extraction API is available (>= 0.17).
+
+    Honors ``AX_DISABLE_VLLM_HS=1`` to force the slow HF extraction path.  This
+    is required when the user wants to run :class:`VLLMMoEEditor` router
+    suppression — that editor needs ``safety_experts`` computed by
+    ``engine.identify_safety_experts``, which only runs if the HF model was
+    actually loaded (i.e. we did NOT take the vLLM-native fast path).
+    """
+    if os.environ.get("AX_DISABLE_VLLM_HS", "") == "1":
+        return False
     try:
         from vllm.distributed.kv_transfer.kv_connector.v1.example_hidden_states_connector import (  # noqa: F401
             ExampleHiddenStatesConnector,
@@ -500,16 +509,17 @@ def run():
         print()
         print("[bold]Fast hidden state extraction (vLLM native TP)[/]")
         try:
-            print("* Extracting residuals for benign prompts...")
-            _precomputed_benign_states = extract_hidden_states_vllm(
+            # Extract benign + target in a single vLLM load.  A reload per set
+            # would pay the MooseFS shard pull (~2.5 min on 15-shard MoEs)
+            # twice for no reason.
+            print("* Extracting residuals for benign + target prompts...")
+            _hs = extract_hidden_states_vllm(
                 config,
-                benign_msgs,
+                {"benign": benign_msgs, "target": target_msgs},
             )
-            print("* Extracting residuals for target prompts...")
-            _precomputed_target_states = extract_hidden_states_vllm(
-                config,
-                target_msgs,
-            )
+            _precomputed_benign_states = _hs["benign"]
+            _precomputed_target_states = _hs["target"]
+            del _hs
             print()
         except Exception as exc:
             print(
@@ -736,12 +746,20 @@ def run():
         flush_memory()
 
         # Profile MoE expert routing if applicable.
-        # Skip for vLLM backend — expert routing is not supported in vLLM mode
-        # (only LoRA weight steering is applied).
+        # For vLLM we still profile here (HF phase, before unload) so that
+        # the TP trial loop can apply router-weight suppression on the
+        # loaded vLLM model via collective_rpc (see VLLMMoEEditor).
+        # SGLang path does not yet have an equivalent editor and keeps the
+        # original skip behaviour.
         safety_experts: dict[int, list[tuple[int, float]]] | None = None
-        if engine.has_expert_routing() and config.model.backend not in (
-            "vllm",
-            "sglang",
+        # Only do HF router profiling when the HF model is actually loaded.
+        # Under vLLM fast extraction path, engine.model is None (lightweight
+        # engine) — VLLMMoEEditor does its own profiling via collective_rpc
+        # during the phase transition below.
+        if (
+            engine.model is not None
+            and engine.has_expert_routing()
+            and config.model.backend != "sglang"
         ):
             print()
             print("Profiling MoE expert activations...")
@@ -796,6 +814,123 @@ def run():
             engine._projection_cache = projection_cache
             engine._current_adapter_path = None  # baseline = no adapter
 
+            # Attach MoE router editor so the optimizer can apply router
+            # suppression per trial via collective_rpc.  Only on vLLM
+            # backend (SGLang has no equivalent editor yet).
+            if config.model.backend == "vllm" and hasattr(tp_gen, "set_moe_editor"):
+                # If HF profiling was skipped (fast vLLM-native extraction
+                # path → no HF model loaded), profile directly on the TP
+                # vLLM instance via collective_rpc-attached router hooks.
+                if safety_experts is None:
+                    from .core.vllm_moe_editor import (
+                        VLLMMoEEditor,
+                        profile_safety_experts_by_weight,
+                        profile_safety_experts_vllm,
+                    )
+
+                    # Cheap probe: construct editor with empty safety_experts
+                    # just to discover whether any layer exposes a router.
+                    _probe_ed = VLLMMoEEditor(tp_gen.llm, {})
+                    _probe_ed.probe()
+                    if _probe_ed._router_layers:
+                        # Derive top_k from the model config (num_experts_per_tok).
+                        try:
+                            from transformers import AutoConfig
+
+                            _auto_cfg = AutoConfig.from_pretrained(
+                                config.model.model_id,
+                                trust_remote_code=config.model.trust_remote_code or False,
+                            )
+                            _text_cfg = getattr(_auto_cfg, "text_config", _auto_cfg)
+                            _top_k = int(
+                                getattr(_text_cfg, "num_experts_per_tok", 4)
+                            )
+                        except Exception:
+                            _top_k = 4
+
+                        print(
+                            f"* Profiling MoE safety experts via vLLM "
+                            f"(top_k={_top_k}, {len(_probe_ed._router_layers)} "
+                            f"router layers)..."
+                        )
+                        safety_experts = profile_safety_experts_vllm(
+                            tp_gen.llm,
+                            benign_msgs,
+                            target_msgs,
+                            tp_gen.tokenizer,
+                            top_k=_top_k,
+                        )
+
+                    # Fallback: vLLM's fused TRITON MxFP4 MoE kernel bypasses
+                    # the router nn.Module's forward, so hook-based profiling
+                    # returns empty counts.  Rank experts by router-weight
+                    # alignment with the per-layer refusal direction instead.
+                    if (
+                        _probe_ed._router_layers
+                        and not safety_experts
+                        and vectors is not None
+                    ):
+                        print(
+                            "* Hook-based profiling returned empty — falling "
+                            "back to router-weight alignment heuristic..."
+                        )
+                        safety_experts = profile_safety_experts_by_weight(
+                            tp_gen.llm,
+                            vectors,
+                        )
+
+                if safety_experts:
+                    print(
+                        f"* Attaching MoE router editor ({len(safety_experts)} "
+                        f"MoE layers)..."
+                    )
+                    tp_gen.set_moe_editor(safety_experts)
+
+            # In-place editing path: attach expert + attention editors so the
+            # optimizer trial loop edits vLLM weights directly (no LoRA adapter).
+            # Requires TRITON backend (FLASHINFER_TRTLLM repacks w2_weight
+            # into an opaque block layout) and enforce_eager=True. See
+            # VllmConfig.use_in_place_editing for env-var requirements.
+            if (
+                config.model.backend == "vllm"
+                and config.model.use_in_place_editing
+                and hasattr(tp_gen, "set_expert_editor")
+            ):
+                # Derive hidden_size + transposed flag from the HF config —
+                # engine.hf_config is populated during Phase 1 load.
+                _hidden = getattr(engine, "hidden_size", None)
+                _transposed = bool(
+                    getattr(engine, "_fused_down_proj_transposed", False)
+                )
+                if _hidden is None:
+                    try:
+                        from transformers import AutoConfig as _AC
+                        _c = _AC.from_pretrained(
+                            config.model.model_id,
+                            trust_remote_code=config.model.trust_remote_code or False,
+                        )
+                        _hidden = int(getattr(
+                            getattr(_c, "text_config", _c),
+                            "hidden_size",
+                            0,
+                        ))
+                    except Exception:
+                        _hidden = 0
+                if _hidden > 0:
+                    print(
+                        f"* Attaching vLLM in-place editors "
+                        f"(hidden={_hidden}, transposed={_transposed})..."
+                    )
+                    tp_gen.set_expert_editor(
+                        hidden_dim=_hidden, transposed=_transposed
+                    )
+                    tp_gen.set_attention_editor()
+                else:
+                    print(
+                        "  [yellow]use_in_place_editing=true but hidden_size "
+                        "could not be resolved — skipping in-place attach.[/]"
+                    )
+
             # If engine has no model (lightweight mode), populate cached
             # metadata from the projection cache so optimizer can query it.
             if engine.model is None and engine._cached_n_layers is None:
@@ -807,6 +942,48 @@ def run():
                         for comp in layer
                     }
                 )
+            # If an in-place expert editor was attached, "mlp.down_proj" must
+            # appear in cached_components so the optimizer generates an EGA
+            # steering profile for it.  The fused expert tensor is NOT in the
+            # projection cache (EGA computes projections inline from the
+            # steering vector), so it is absent from the block above.
+            if (
+                engine._cached_components is not None
+                and "mlp.down_proj" not in engine._cached_components
+                and getattr(tp_gen, "expert_editor", None) is not None
+                and len(getattr(tp_gen.expert_editor, "_moe_layers", [])) > 0
+            ):
+                engine._cached_components = sorted(
+                    set(engine._cached_components) | {"mlp.down_proj"}
+                )
+                print("  * Injected 'mlp.down_proj' into steerable components (EGA)")
+
+            # If an in-place attention editor was attached, q/k/v/o_proj must
+            # all appear in cached_components so the optimizer generates
+            # steering profiles for every attention projection. ``_apply_direct_
+            # steering_vllm`` (steering.py) dispatches to VLLMAttentionEditor
+            # which handles fused qkv_proj slicing on TP workers — but only if
+            # the profiles exist. Without this injection, ProjectionCache only
+            # contributes ``attn.o_proj`` (its build loop skips q/k/v because
+            # ``d_out != hidden_dim`` makes ``sv @ W`` dimensionally invalid),
+            # leaving 3/4 of attention unsteered.
+            if (
+                engine._cached_components is not None
+                and getattr(tp_gen, "attention_editor", None) is not None
+                and len(getattr(tp_gen.attention_editor, "_attn_layers", set())) > 0
+            ):
+                _attn_needed = {
+                    "attn.q_proj", "attn.k_proj", "attn.v_proj", "attn.o_proj",
+                }
+                _attn_missing = _attn_needed - set(engine._cached_components)
+                if _attn_missing:
+                    engine._cached_components = sorted(
+                        set(engine._cached_components) | _attn_missing
+                    )
+                    print(
+                        f"  * Injected {sorted(_attn_missing)} into steerable "
+                        f"components (fused qkv_proj slicing on TP workers)"
+                    )
 
             # Detect response prefix via the fast TP backend (if not done earlier).
             if not engine.response_prefix:

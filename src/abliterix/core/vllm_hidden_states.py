@@ -15,6 +15,7 @@ Requires vLLM >= 0.17.0 (PR #33736).
 
 from __future__ import annotations
 
+import os
 import tempfile
 from typing import Any
 
@@ -64,26 +65,33 @@ def is_model_supported(config: AbliterixConfig) -> bool:
 
 def extract_hidden_states_vllm(
     config: AbliterixConfig,
-    messages: list[ChatMessage],
+    prompt_sets: dict[str, list[ChatMessage]],
     token_offset: int = -1,
-) -> Tensor:
+) -> dict[str, Tensor]:
     """Extract per-layer hidden states using vLLM's native extraction API.
+
+    Loads the model once and extracts hidden states for every prompt set in
+    a single ``llm.generate`` call — a reload per set would pay the MooseFS
+    shard pull (~2.5 min for 15-shard models) for each one.
 
     Parameters
     ----------
     config : AbliterixConfig
         Model and inference configuration.
-    messages : list[ChatMessage]
-        Prompts to extract hidden states from.
+    prompt_sets : dict[str, list[ChatMessage]]
+        Named prompt sets (e.g. ``{"benign": [...], "target": [...]}``).
+        All sets are tokenized and submitted together; outputs are split
+        back by name on return.
     token_offset : int
         Position in the sequence to extract from.  ``-1`` (default) extracts
         the final token.
 
     Returns
     -------
-    Tensor
-        Shape ``(batch, layers+1, hidden_dim)``.  Index 0 is a zero
-        placeholder for the embedding layer; indices 1..N are decoder
+    dict[str, Tensor]
+        Same keys as ``prompt_sets``.  Each tensor has shape
+        ``(batch, layers+1, hidden_dim)``.  Index 0 along the layer axis is
+        a zero placeholder for the embedding layer; indices 1..N are decoder
         layer outputs.
     """
     from vllm import LLM, SamplingParams
@@ -103,7 +111,21 @@ def extract_hidden_states_vllm(
 
     print(f"* Loading model in vLLM with TP={tp} for hidden state extraction...")
 
-    tmpdir = tempfile.mkdtemp(prefix="abliterix_hs_")
+    # The connector writes per-layer hidden states for every processed prompt
+    # — for a 36-layer 400-prompt run that's ~16 GB.  Container /tmp is often
+    # a 20 GB overlayfs that fills fast; route to /workspace (or configured
+    # HF_HOME parent) which on RunPod is a 1 TB+ volume.
+    hs_parent = os.environ.get("AX_HIDDEN_STATES_DIR")
+    if not hs_parent:
+        hf_home = os.environ.get("HF_HOME") or os.environ.get("HF_HUB_CACHE")
+        hs_parent = (
+            os.path.dirname(hf_home) if hf_home else None
+        ) or ("/workspace" if os.path.isdir("/workspace") else None)
+    if hs_parent and os.path.isdir(hs_parent):
+        os.makedirs(hs_parent, exist_ok=True)
+        tmpdir = tempfile.mkdtemp(prefix="abliterix_hs_", dir=hs_parent)
+    else:
+        tmpdir = tempfile.mkdtemp(prefix="abliterix_hs_")
 
     kwargs: dict[str, Any] = dict(
         model=model_id,
@@ -128,6 +150,14 @@ def extract_hidden_states_vllm(
             },
         },
     )
+    # Forward max_model_len so vLLM doesn't reserve KV for the model's full
+    # native context (e.g. 196K for MiniMax-M2 would require 81GB/GPU for
+    # a single request and OOMs the engine). Abliteration prompts + gen are
+    # < 2K, so the config-level cap is the right ceiling.
+    if config.model.max_model_len:
+        kwargs["max_model_len"] = config.model.max_model_len
+    if config.model.max_num_seqs:
+        kwargs["max_num_seqs"] = config.model.max_num_seqs
 
     # Model config overrides (e.g. MTP-3 → MTP-1 for Step-3.5-Flash).
     if config.model.hf_overrides:
@@ -140,32 +170,40 @@ def extract_hidden_states_vllm(
 
     llm = LLM(**kwargs)
 
-    # Tokenize prompts.
+    # Tokenize prompts.  Flatten every set into a single prompt list and
+    # remember each set's slice so we can split hidden states back on return.
     tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=trust)
     prompts: list[str] = []
-    for msg in messages:
-        chat = []
-        if msg.system:
-            chat.append({"role": "system", "content": msg.system})
-        chat.append({"role": "user", "content": msg.user})
-        try:
-            text = tokenizer.apply_chat_template(
-                chat,
-                add_generation_prompt=True,
-                tokenize=False,
-                enable_thinking=False,
-            )
-        except TypeError:
-            text = tokenizer.apply_chat_template(
-                chat,
-                add_generation_prompt=True,
-                tokenize=False,
-            )
-        prompts.append(text)
+    set_slices: dict[str, tuple[int, int]] = {}
+    for set_name, messages in prompt_sets.items():
+        start = len(prompts)
+        for msg in messages:
+            chat = []
+            if msg.system:
+                chat.append({"role": "system", "content": msg.system})
+            chat.append({"role": "user", "content": msg.user})
+            try:
+                text = tokenizer.apply_chat_template(
+                    chat,
+                    add_generation_prompt=True,
+                    tokenize=False,
+                    enable_thinking=False,
+                )
+            except TypeError:
+                text = tokenizer.apply_chat_template(
+                    chat,
+                    add_generation_prompt=True,
+                    tokenize=False,
+                )
+            prompts.append(text)
+        set_slices[set_name] = (start, len(prompts))
 
+    set_summary = ", ".join(
+        f"{name}={end - start}" for name, (start, end) in set_slices.items()
+    )
     print(
-        f"* Extracting hidden states for {len(messages)} prompts "
-        f"({num_layers} layers, TP={tp})..."
+        f"* Extracting hidden states for {len(prompts)} prompts "
+        f"({set_summary}; {num_layers} layers, TP={tp})..."
     )
 
     sampling_params = SamplingParams(max_tokens=1)
@@ -183,10 +221,34 @@ def extract_hidden_states_vllm(
 
         with safe_open(hs_path, "pt") as f:
             hs = f.get_tensor("hidden_states")
-            # Shape: [num_layers, prompt_len, hidden_dim]
 
-        # Extract at token_offset: [num_layers, hidden_dim]
-        layer_vecs = hs[:, token_offset, :]
+        # vLLM's ExampleHiddenStatesConnector stores hidden states as
+        # [prompt_len, num_layers, hidden_dim] — NOT [num_layers, prompt_len,
+        # hidden_dim] as earlier versions of this file assumed.  The wrong
+        # ordering caused torch.stack across prompts to fail with
+        # "stack expects equal size, got [180, 2880] and [113, 2880]"
+        # (the varying 1st dim was prompt_len, not num_layers).
+        # Auto-detect which axis is the layer axis by finding the one whose
+        # length matches our known num_layers; fall back to the
+        # prompt_len-first interpretation since that's what we've observed
+        # on gpt-oss / vLLM 0.19.
+        if hs.dim() == 3:
+            if hs.shape[0] == num_layers:
+                # [num_layers, prompt_len, hidden_dim] — original assumption.
+                layer_vecs = hs[:, token_offset, :]
+            elif hs.shape[1] == num_layers:
+                # [prompt_len, num_layers, hidden_dim] — observed on gpt-oss.
+                layer_vecs = hs[token_offset, :, :]
+            else:
+                raise RuntimeError(
+                    f"Unexpected hidden_states shape {list(hs.shape)} "
+                    f"(num_layers={num_layers}); neither dim 0 nor dim 1 "
+                    f"matches the layer count."
+                )
+        else:
+            raise RuntimeError(
+                f"Expected 3-D hidden_states tensor, got shape {list(hs.shape)}"
+            )
 
         # Prepend zeros for embedding layer (index 0).
         hidden_dim = layer_vecs.shape[1]
@@ -194,7 +256,13 @@ def extract_hidden_states_vllm(
         batch_residuals.append(torch.cat([embedding_placeholder, layer_vecs], dim=0))
 
     residuals = torch.stack(batch_residuals, dim=0).to(torch.float32)
-    print(f"  [green]Ok[/] — shape: {list(residuals.shape)}")
+
+    results: dict[str, Tensor] = {}
+    for set_name, (start, end) in set_slices.items():
+        results[set_name] = residuals[start:end].contiguous()
+        print(
+            f"  [green]Ok[/] — {set_name}: shape {list(results[set_name].shape)}"
+        )
 
     # Cleanup: delete the LLM to free VRAM.
     del llm
@@ -205,4 +273,4 @@ def extract_hidden_states_vllm(
 
     shutil.rmtree(tmpdir, ignore_errors=True)
 
-    return residuals
+    return results

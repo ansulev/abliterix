@@ -1,0 +1,116 @@
+non_interactive = true
+
+# MiniMax-M2.7 (MoE) — vLLM TP=8 + LoRA + FP8 native on 8× H100-80GB SXM
+# 256 experts (8 routed), 62 layers, hidden=3072, expert_dim=1536
+# FP8 ~215GB on disk, TP=8 → ~27GB/GPU. 8× H100-80GB = 640GB total.
+#
+# Steering mechanism (this config): LoRA adapters on
+#   - attn.o_proj                       (1 module × 62 layers = 62)
+#   - block_sparse_moe.experts.E.w2     (256 × 62 = 15,872 modules — real projection)
+#   - block_sparse_moe.experts.E.w1/w3  (15,872 × 2 = 31,744 modules — ZERO LoRAs,
+#                                         required only to satisfy vLLM
+#                                         `PackedLoRALayerWeights.pack_moe` assert)
+# Total: ~48k LoRA tensor pairs per trial; ~1.7 GB adapter size.
+#
+# Why it works (vs the failed 97-99/100 refusals from the 2× H200 attempt):
+# the prior vllm_backend skipped all MoE expert paths. Now `_STEERABLE_PATTERNS`
+# includes experts.E.w1/w2/w3 (Phi/MiniMax naming) and their gate_proj/up_proj/
+# down_proj variants. Zero-LoRA companions on w1/w3 mean they're acknowledged
+# by pack_moe without affecting forward; real projection runs through w2.
+#
+# Hardware assumptions:
+#   - 8× H100-80GB with NVLink/NVSwitch full-mesh (SXM, not PCIe)
+#   - Driver 535+, CUDA 12.x
+#   - vLLM 0.19.x (stable or nightly; nightly fine with cu128/cu130 wheels)
+#   - FlashInfer pre-compiled for sm_90a (no 20-min JIT like sm_100/sm_120)
+
+[model]
+model_id = "MiniMaxAI/MiniMax-M2.7"
+dtype_fallback_order = ["auto"]
+quant_method = "fp8"
+skip_fp8_dequant = true             # H100+ native FP8 GEMM is fast + stable
+attn_implementation = "flash_attention_2"
+use_torch_compile = false
+device_map = "auto"
+trust_remote_code = true
+# 8× H100-80GB with headroom for activations/KV.
+max_memory = {0 = "76GiB", 1 = "76GiB", 2 = "76GiB", 3 = "76GiB", 4 = "76GiB", 5 = "76GiB", 6 = "76GiB", 7 = "76GiB"}
+fp8_handling = "auto"               # LoRA path → forward_dequant auto-picked
+
+# ─── vLLM backend ────────────────────────────────────────────────────────────
+backend = "vllm"
+tensor_parallel_size = 8            # TP=8 divides num_kv_heads=8 cleanly
+enable_expert_parallel = false      # LoRA + EP incompatible (vllm_lora_ep_incompatible.md)
+enable_chunked_prefill = true
+enforce_eager = true                # LoRA shrink dtype assert workaround
+gpu_memory_utilization = 0.90
+kv_cache_dtype = "fp8_e4m3"         # 2× KV capacity on H100+
+max_model_len = 4096
+max_num_seqs = 128                  # 8 GPUs can sustain higher batch
+
+[inference]
+batch_size = 0
+max_batch_size = 128
+max_gen_tokens = 64
+
+[steering]
+# steering_mode = "lora" (default)
+vector_method = "mean"
+n_directions = 1
+orthogonal_projection = true
+winsorize_vectors = true
+winsorize_quantile = 0.995
+discriminative_layer_selection = true
+decay_kernel = "linear"             # Qwen3.6 recipe winner
+weight_normalization = "none"
+# Drop Q/K/V — refusal signal lives in expert path (Qwen3.6 MoE lesson).
+disabled_components = ["attn.q_proj", "attn.k_proj", "attn.v_proj"]
+# Qwen3.6-35B 93% ASR winning range is [0.5, 6.0]. For MoE expert LoRA we
+# give the same range to attn.o_proj and a slightly wider one to mlp.down_proj
+# (w2), which here carries per-expert refusal projection.
+strength_range = [0.5, 6.0]
+
+[steering.component_strength_ranges]
+"mlp.down_proj" = [1.0, 8.0]
+
+[optimization]
+num_trials = 50
+num_warmup_trials = 15
+checkpoint_dir = "checkpoints_minimax_m27_h100x8_lora"
+
+[kl]
+scale = 1.0
+token_count = 3
+target = 0.01
+prune_threshold = 5.0
+
+[detection]
+llm_judge = true
+llm_judge_model = "google/gemini-3.1-flash-lite-preview"
+llm_judge_batch_size = 10
+llm_judge_concurrency = 25
+
+[display]
+print_responses = false
+print_residual_geometry = false
+plot_residuals = false
+
+[benign_prompts]
+dataset = "datasets/good_1000"
+split = "train[:400]"
+column = "prompt"
+
+[target_prompts]
+dataset = "datasets/harmful_1000"
+split = "train[:400]"
+column = "prompt"
+
+[benign_eval_prompts]
+dataset = "datasets/good_1000"
+split = "train[400:500]"
+column = "prompt"
+
+[target_eval_prompts]
+dataset = "datasets/harmful_1000"
+split = "train[400:500]"
+column = "prompt"

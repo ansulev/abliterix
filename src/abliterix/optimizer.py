@@ -79,10 +79,12 @@ def run_search(
         trial.set_user_attr("index", trial_counter)
 
         # --- Vector scope ---
-        vector_scope = trial.suggest_categorical(
-            "vector_scope",
-            ["global", "per layer"],
+        scope_choices = (
+            [config.steering.fixed_vector_scope]
+            if config.steering.fixed_vector_scope
+            else ["global", "per layer"]
         )
+        vector_scope = trial.suggest_categorical("vector_scope", scope_choices)
 
         # Discrimination is strongest slightly past the midpoint.
         # Widen the search for shallow models (< 20 layers).
@@ -183,27 +185,116 @@ def run_search(
         proj_cache = getattr(engine, "_projection_cache", None)
         adapter_path = None
 
-        if vllm_gen is not None and proj_cache is not None:
-            if routing is not None and trial_counter == 1:
-                print(
-                    "  [yellow]Warning: MoE expert routing (n_suppress, router_bias, "
-                    "expert_ablation_weight) is not supported in vLLM mode — "
-                    "only LoRA weight steering is applied.[/]"
-                )
-            print("* Building LoRA adapter for vLLM...")
-            lora_weights = proj_cache.build_lora_weights(
-                profiles,
-                vector_index,
-                config,
+        # Track whether we applied router suppression this trial so we can
+        # restore in the `finally` block regardless of TrialPruned / errors.
+        _moe_applied_this_trial = False
+        # Track whether the in-place editors mutated weights — needed for
+        # restore in the finally block.
+        _in_place_applied_this_trial = False
+
+        # In-place editing path: direct weight edits on TP workers via
+        # collective_rpc. Takes precedence over the LoRA adapter path when
+        # both editors are attached (see cli.py setup block).
+        _in_place_mode = (
+            vllm_gen is not None
+            and getattr(vllm_gen, "expert_editor", None) is not None
+            and getattr(vllm_gen, "attention_editor", None) is not None
+        )
+
+        if _in_place_mode:
+            from .core.steering import apply_steering_vllm_inplace
+            # Resolve n_layers + hidden_dim from the attention editor's
+            # probe, falling back to config.
+            _probe_layers = sorted(
+                vllm_gen.attention_editor._attn_layers
+                | vllm_gen.expert_editor._moe_layers
             )
-            if lora_weights:
-                adapter_path = vllm_gen.save_adapter(
-                    lora_weights,
-                    proj_cache.target_modules,
-                    config.model.model_id,
+            _n_layers = (_probe_layers[-1] + 1) if _probe_layers else 0
+            if _n_layers == 0:
+                # Probe failed — fall back to cached metadata.
+                _n_layers = engine._cached_n_layers or 0
+            _hidden = vllm_gen.expert_editor.hidden_dim
+            _transposed = vllm_gen.expert_editor.transposed
+
+            print("* Applying steering (vLLM in-place)...")
+            _ip_result = apply_steering_vllm_inplace(
+                vllm_gen,
+                steering_vectors,
+                vector_index,
+                profiles,
+                config,
+                n_layers=_n_layers,
+                hidden_dim=_hidden,
+                transposed=_transposed,
+                safety_experts=safety_experts,
+                routing_config=routing,
+            )
+            _in_place_applied_this_trial = True
+            _moe_applied_this_trial = _ip_result.get("router_touched", 0) > 0
+
+            if trial_counter == 1:
+                print(
+                    f"  * in-place attention: applied="
+                    f"{_ip_result['attention'].get('applied', 0)}, "
+                    f"ega: applied={_ip_result['ega'].get('applied', 0)}, "
+                    f"router rows modified={_ip_result['router_touched']}"
                 )
+        elif vllm_gen is not None and proj_cache is not None:
+            if getattr(vllm_gen, "_lora_disabled", False):
+                # vLLM loaded without LoRA (e.g. MXFP4 + driver 570 Marlin-FP4
+                # PTX issue).  Skip the per-trial adapter build entirely —
+                # attention steering is off, router suppression below carries
+                # the signal.
+                if trial_counter == 1:
+                    print(
+                        "* LoRA disabled — skipping attention adapter; "
+                        "router suppression is the only steering mechanism."
+                    )
+            else:
+                print("* Building LoRA adapter for vLLM...")
+                lora_weights = proj_cache.build_lora_weights(
+                    profiles,
+                    vector_index,
+                    config,
+                )
+                if lora_weights:
+                    adapter_path = vllm_gen.save_adapter(
+                        lora_weights,
+                        proj_cache.target_modules,
+                        config.model.model_id,
+                    )
             # Store adapter path on engine for scorer/detector to use.
             engine._current_adapter_path = adapter_path
+
+            # MoE router suppression via collective_rpc.  Only active when
+            # the HF phase identified safety experts AND the editor was
+            # attached in cli.py.  Expert-ablation-weight on fused experts
+            # is still skipped under vLLM (packed MXFP4/FP8 can't be edited
+            # in place without a full dequant pass).
+            if (
+                routing is not None
+                and getattr(vllm_gen, "moe_editor", None) is not None
+            ):
+                touched = vllm_gen.apply_router_suppression(
+                    n_suppress=routing.n_suppress,
+                    bias_value=routing.router_bias,
+                )
+                _moe_applied_this_trial = touched > 0
+                if trial_counter == 1:
+                    if _moe_applied_this_trial:
+                        scale = max(0.0, 1.0 + routing.router_bias / 10.0)
+                        print(
+                            f"  * Router suppression: n_suppress={routing.n_suppress}, "
+                            f"router_bias={routing.router_bias:.2f} → scale={scale:.2f}, "
+                            f"{touched} rows modified per worker"
+                        )
+                    elif routing.expert_ablation_weight > 0:
+                        print(
+                            "  [yellow]Expert-ablation-weight on fused experts "
+                            "is skipped under vLLM (packed quant weights cannot "
+                            "be edited in place).  Router suppression + attention "
+                            "LoRA are applied.[/]"
+                        )
         else:
             print("* Resetting model...")
             engine.restore_baseline()
@@ -221,25 +312,36 @@ def run_search(
                 target_states=target_states,
             )
 
-        print("* Evaluating...")
-        kl, length_dev = scorer.measure_kl_and_coherence(engine)
+        try:
+            print("* Evaluating...")
+            kl, length_dev = scorer.measure_kl_and_coherence(engine)
 
-        # Early pruning for excessively damaged models.
-        if config.kl.prune_threshold > 0 and kl > config.kl.prune_threshold:
-            print(
-                f"  * [yellow]KL divergence {kl:.4f} exceeds prune threshold "
-                f"{config.kl.prune_threshold}, skipping compliance check[/]"
+            # Early pruning for excessively damaged models.
+            if config.kl.prune_threshold > 0 and kl > config.kl.prune_threshold:
+                print(
+                    f"  * [yellow]KL divergence {kl:.4f} exceeds prune threshold "
+                    f"{config.kl.prune_threshold}, skipping compliance check[/]"
+                )
+                raise TrialPruned()
+
+            print("  * Counting model refusals...")
+            detected = scorer.detector.evaluate_compliance(
+                engine,
+                scorer.target_msgs,
             )
-            raise TrialPruned()
+            print(f"  * Refusals: [bold]{detected}[/]/{len(scorer.target_msgs)}")
 
-        print("  * Counting model refusals...")
-        detected = scorer.detector.evaluate_compliance(
-            engine,
-            scorer.target_msgs,
-        )
-        print(f"  * Refusals: [bold]{detected}[/]/{len(scorer.target_msgs)}")
-
-        objectives = scorer._compute_objectives(kl, detected, length_dev)
+            objectives = scorer._compute_objectives(kl, detected, length_dev)
+        finally:
+            # Always restore vLLM router edits so the next trial starts from
+            # the pristine base model.  No-op if nothing was applied.
+            if _moe_applied_this_trial and vllm_gen is not None:
+                vllm_gen.restore_router_suppression()
+            # Restore in-place edits (attention + EGA) so trial N+1 starts
+            # from pristine weights. Router already handled above.
+            if _in_place_applied_this_trial and vllm_gen is not None:
+                vllm_gen.restore_attention_weights()
+                vllm_gen.restore_expert_weights()
 
         # Timing / resource report
         elapsed = time.perf_counter() - start_time

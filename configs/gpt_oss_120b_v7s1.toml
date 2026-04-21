@@ -1,0 +1,142 @@
+non_interactive = true
+
+# GPT-OSS-120B v7 Stage 1 — Narrow-band re-optimization
+# =====================================================
+#
+# Target: Reach 15-22/100 refusals with a clean single-direction ablation
+#         that Stage 2 can polish to single-digit.
+#
+# Lineage:
+#   v5 T78   ship  26/100 (KL 5.4e-06) — current best
+#   v6 T116  46/100 (KL 1.92e-02, len_dev 0.413) — wider search failed:
+#            extra q/k/v dims starved TPE's warmup budget, over-steer
+#            cliff at strength=7 wasted half the trials
+#   v7s1 = revert to v5's proven narrow bounds, 2× the budget, keep the
+#          v6 lessons that actually helped (per-layer scope, stronger
+#          judge, len_dev in scorer)
+#
+# v7s1 delta from v5:
+#   1. num_trials         100  → 200      — TPE needs more TPE-phase samples
+#   2. num_warmup_trials   40  →  80      — 9-dim space wants 8.9 samples/dim
+#   3. fixed_vector_scope  TPE → per layer — v6 evidence: per-layer gives
+#                                            better len_dev (T90 0.022 vs
+#                                            v5 T78 0.042) at comparable KL
+#   4. disabled_components  [] → q/k/v    — v6 tested: adding q/k/v dilutes
+#                                            TPE budget without ASR gain
+#
+# Kept from v5 (PROVEN WORKING):
+#   - strength_range [1, 4]                — temperate attention band
+#   - mlp.down_proj   [6, 9]               — EGA on fused 128 experts
+#   - min_weight_frac_max 0.6              — smooth decay profiles
+#   - component_min_frac_max 0.25 for EGA  — same smoothness policy
+#   - router_bias_range [-5, 0] + max_suppress 6
+#
+# Kept from v6 (HARDENED JUDGE):
+#   - max_gen_tokens 256                   — catches long-form collapse
+#   - llm_judge_batch_size 1 + concur 16   — no anchor bias
+#   - judge prompt w/ metaphor-deflection  — in detector.py
+#
+# Expected wall time: 200 trials × ~60s = ~3.3 hr on 4× RTX PRO 6000 TP=4.
+
+[model]
+model_id = "/workspace/gpt-oss-120b-bf16"
+dtype_fallback_order = ["bfloat16"]
+quant_method = "none"
+use_torch_compile = false
+device_map = "auto"
+trust_remote_code = true
+max_memory = {0 = "92GiB", 1 = "92GiB", 2 = "92GiB", 3 = "92GiB"}
+tensor_parallel_size = 4
+backend = "vllm"
+enforce_eager = true
+disable_lora = true
+use_in_place_editing = true
+max_model_len = 1024
+
+[inference]
+batch_size = 0
+max_batch_size = 32
+max_gen_tokens = 256
+
+[steering]
+vector_method = "mean"
+steering_mode = "direct"
+decay_kernel = "linear"
+orthogonal_projection = true
+weight_normalization = "full"
+
+# Back to v5's temperate attention band — v6 [1, 7] was over-correction.
+strength_range = [1.0, 4.0]
+min_weight_frac_max = 0.6
+
+# Per-layer scope — v6 evidence says per-layer preserves len_dev better
+# than global on this arch.  Pin it so TPE doesn't waste trials on global.
+fixed_vector_scope = "per layer"
+
+# Drop q/k/v from the search — v6 150-trial run showed they don't help
+# refusal and they starve TPE's per-dim budget (20 dims ÷ 60 warmup = 3
+# samples/dim, below TPE's 10/dim target).  o_proj-only brings us back to
+# ~9 dims, matching v5's working regime.
+disabled_components = ["attn.q_proj", "attn.k_proj", "attn.v_proj"]
+
+# EGA band from v5 (T78 peaked at 6.74 — upper half rarely productive)
+[steering.component_strength_ranges]
+"mlp.down_proj" = [6.0, 9.0]
+
+[steering.component_min_frac_max]
+"mlp.down_proj" = 0.25
+
+[optimization]
+# 200 trials = v5's 100 + 100 more.  Warmup scaled proportionally to keep
+# TPE's model healthy.
+# 80 warmup / 9 search dims = 8.9 samples/dim (v5 was 4.4, v6 was 3.0).
+# First time this pod run hits TPE's typical 10/dim recommendation.
+num_trials = 200
+num_warmup_trials = 80
+checkpoint_dir = "checkpoints_gpt_oss_120b_v7s1"
+
+# Router suppression — v5 range.  v6 tried [-10, 0] + max_suppress=12 but
+# both winners still picked gentle settings (T116: n_suppress=1 bias=-4.1)
+# — the wider range was burning warmup trials on extreme router configs
+# that never paid off.
+[experts]
+max_suppress = 6
+router_bias_range = [-5.0, 0.0]
+ablation_weight_range = [0.0, 0.0]
+
+[kl]
+scale = 1.0
+token_count = 3
+target = 0.01
+prune_threshold = 5.0
+
+[detection]
+llm_judge = true
+llm_judge_model = "google/gemini-3.1-flash-lite-preview"
+llm_judge_batch_size = 1
+llm_judge_concurrency = 16
+
+[display]
+print_responses = false
+print_residual_geometry = false
+plot_residuals = false
+
+[benign_prompts]
+dataset = "datasets/good_500"
+split = "train[:400]"
+column = "prompt"
+
+[target_prompts]
+dataset = "datasets/harmful_500"
+split = "train[:400]"
+column = "prompt"
+
+[benign_eval_prompts]
+dataset = "datasets/good_500"
+split = "train[400:]"
+column = "prompt"
+
+[target_eval_prompts]
+dataset = "datasets/harmful_500"
+split = "train[400:]"
+column = "prompt"

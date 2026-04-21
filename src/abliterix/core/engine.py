@@ -35,8 +35,9 @@ from transformers.generation import (
 )
 
 from ..settings import AbliterixConfig
-from ..types import ChatMessage, QuantMode, WeightNorm
+from ..types import ChatMessage, QuantMode, SteeringMode, WeightNorm
 from ..util import chunk_batches, flush_memory, print
+from . import fp8_utils
 
 # transformers < 5.0 uses torch_dtype=, >= 5.0 uses dtype= in from_pretrained.
 import transformers as _tf
@@ -325,6 +326,14 @@ class SteeringEngine:
                 if config.model.attn_implementation is not None:
                     extra["attn_implementation"] = config.model.attn_implementation
 
+                if (
+                    getattr(config.model, "experts_implementation", None)
+                    is not None
+                ):
+                    extra["experts_implementation"] = (
+                        config.model.experts_implementation
+                    )
+
                 self.model = resolve_model_class(model_id).from_pretrained(
                     model_id,
                     **{_dtype_kwarg: dtype},
@@ -338,18 +347,53 @@ class SteeringEngine:
                 if self.trusted_models.get(model_id) is None:
                     self.trusted_models[model_id] = True
 
-                # FP8 handling: decide whether to use native FP8 kernels or
-                # fall back to bf16 dequant.  Applies to both explicit
-                # quant_method="fp8" and auto-detected native FP8 models.
+                # FP8 handling driven by config.model.fp8_handling:
+                #   'auto'           — pick based on steering_mode
+                #   'materialize'    — dequant + replace weights in memory
+                #                      (2x VRAM; supports direct mode, EGA,
+                #                      and transformers FP8Experts unfusing)
+                #   'forward_dequant'— monkey-patch forward (1x VRAM; LoRA only)
+                #   'offline'        — assume pre-dequanted; no FP8 path
                 if is_fp8:
-                    skip = self._should_skip_fp8_dequant()
-                    if not skip:
-                        self._dequant_fp8_to_bf16()
-                    else:
+                    handling = getattr(
+                        self.config.model, "fp8_handling", "auto"
+                    )
+                    direct = (
+                        self.config.steering.steering_mode
+                        == SteeringMode.DIRECT
+                    )
+                    if handling == "auto":
+                        handling = "materialize" if direct else "forward_dequant"
+
+                    if handling == "offline":
                         print(
-                            "  [dim]Using native FP8 kernels "
-                            "(skip_fp8_dequant or auto-detected H100+ "
-                            "with transformers >= 5.2)[/]"
+                            "  [dim]FP8 offline mode: weights assumed to "
+                            "already be BF16 on disk[/]"
+                        )
+                    elif handling == "materialize":
+                        self._materialize_fp8_as_bf16()
+                    elif handling == "forward_dequant":
+                        skip = self._should_skip_fp8_dequant()
+                        if not skip:
+                            self._dequant_fp8_to_bf16()
+                        else:
+                            print(
+                                "  [dim]Using native FP8 kernels "
+                                "(skip_fp8_dequant or auto-detected H100+ "
+                                "with transformers >= 5.2)[/]"
+                            )
+                    else:
+                        raise ValueError(
+                            f"Unknown fp8_handling mode: {handling!r}"
+                        )
+
+                    if direct and handling == "forward_dequant":
+                        print(
+                            "  [yellow]Warning: direct steering with "
+                            "forward_dequant leaves weights in FP8; "
+                            "orthogonal projection will clip on write-back. "
+                            "Set fp8_handling='materialize' or pre-dequant "
+                            "offline.[/]"
                         )
 
                 # Smoke-test: a single forward pass catches dtype-related
@@ -455,85 +499,87 @@ class SteeringEngine:
 
         return False  # Default: safe fallback
 
-    def _dequant_fp8_to_bf16(self):
-        """Replace FP8 Linear forward paths with on-the-fly bf16 dequantization.
+    def _materialize_fp8_as_bf16(self):
+        """Materialise every FP8 container in ``self.model`` as writable BF16.
 
-        Transformers' fine-grained FP8 integration uses Triton JIT kernels for
-        dequant+matmul that have a known async race condition on multi-GPU
-        ``device_map="auto"`` setups (see Qwen FP8 model card warnings and
-        HuggingFace transformers issue tracker).
+        Delegates to :mod:`abliterix.core.fp8_utils` which handles:
 
-        This method monkey-patches every ``nn.Linear`` that holds FP8 weights
-        to dequantize to bf16 on-the-fly during forward, replacing the Triton
-        path with standard CUDA matmul.  Peak memory overhead is one layer's
-        worth of bf16 weights at a time (freed after each forward call).
+        - Standard ``nn.Linear`` with per-tensor FP8 ``weight_scale``
+        - Standard ``nn.Linear`` with 2-D block-wise ``weight_scale_inv``
+          (DeepSeek / MiniMax-M2 / Qwen3-FP8 style)
+        - Fused MoE containers (transformers 5.x ``FP8Experts``) — unfused
+          back into a per-expert ``nn.ModuleList`` so abliterix's EGA/direct
+          code can target each expert's ``.w1 / .w2 / .w3`` individually
+
+        Required for ``steering_mode = "direct"`` because
+        :func:`_apply_direct_steering` writes ``weight.data = W_new.to(dtype)``
+        and FP8's ±448 dynamic range would clip the orthogonal projection.
+
+        Cost: ~2× VRAM (FP8 230GB → BF16 460GB for MiniMax-M2). If the model
+        + KV cache + activations don't fit, prefer offline pre-dequant via
+        :func:`abliterix.core.fp8_utils.dequant_model_to_disk` — loading the
+        resulting standalone BF16 model never invokes transformers' FP8
+        quantiser, side-stepping its MoE traversal bug.
         """
-        _FP8_DTYPES = {torch.float8_e4m3fn, torch.float8_e5m2}
+        counts = fp8_utils.materialize_fp8_model(self.model, verbose=True)
+        if counts["fused_moe_detected"] > 0 or counts["unsupported"] > 0:
+            print(
+                "  [yellow]Fused-MoE FP8 containers cannot be in-memory "
+                "materialised for inference (parent MoE block forward "
+                "expects the fused-kernel API). For direct steering on this "
+                "model, pre-dequant to disk first:[/]\n"
+                "    abliterix-dequant-fp8 <src_snapshot> <dst_bf16_dir>"
+            )
+
+    def _dequant_fp8_to_bf16(self):
+        """Monkey-patch every FP8 ``nn.Linear.forward`` to dequant-on-the-fly.
+
+        Preserves the underlying FP8 storage (1× memory, unlike
+        :meth:`_materialize_fp8_as_bf16`) but redirects the forward path
+        through a standard CUDA ``F.linear`` after in-line BF16 dequant.
+        This bypasses transformers' Triton FP8 kernels whose
+        ``act_quant_kernel`` has a known async race condition on multi-GPU
+        ``device_map="auto"`` setups.
+
+        Use when steering mode is LoRA (weights stay frozen — forward-only
+        dequant is sufficient) and memory headroom cannot accommodate the 2×
+        expansion a full materialisation would require. Does NOT handle
+        fused MoE containers — those require full materialisation (or offline
+        pre-dequant).
+        """
+        from . import fp8_utils as _fp8
+
         patched = 0
+        for _, module, kind in list(_fp8.iter_fp8_linears(self.model)):
+            bias = module.bias
+            if kind == "blockwise":
+                scale = module.weight_scale_inv  # type: ignore[attr-defined]
+                w = module.weight
 
-        for name, module in self.model.named_modules():
-            if not isinstance(module, torch.nn.Linear):
-                continue
-            if module.weight.dtype not in _FP8_DTYPES:
-                continue
-
-            # Check for block-wise FP8 scale tensors (used by fine-grained FP8
-            # models like Qwen3.5-*-FP8).
-            scale_attr = None
-            for attr_name in ("weight_scale", "weight_scale_inv"):
-                if hasattr(module, attr_name):
-                    scale_attr = attr_name
-                    break
-
-            # Stash the original forward and patch.
-
-            if scale_attr is not None:
-                # Block-wise FP8: dequant using the per-block scale tensor.
-                scale_tensor = getattr(module, scale_attr)
-                fp8_weight = module.weight
-                bias = module.bias
-
-                def _make_blockwise_forward(w, s, b, is_inv):
+                def _make_blockwise_forward(w, s, b):
                     def _forward(x):
-                        w_f = w.to(torch.bfloat16)
-                        s_f = s.float()
-                        # Expand block-wise scales to match weight shape.
-                        # Scale shape is (rows/block, cols/block) — expand both dims.
-                        block_r = max(1, w.shape[0] // s.shape[0])
-                        block_c = max(1, w.shape[1] // s.shape[1])
-                        s_exp = s_f.repeat_interleave(block_r, dim=0).repeat_interleave(
-                            block_c, dim=1
-                        )
-                        s_exp = s_exp[: w.shape[0], : w.shape[1]]
-                        if is_inv:
-                            w_bf16 = (w_f * s_exp).to(torch.bfloat16)
-                        else:
-                            w_bf16 = (w_f / s_exp).to(torch.bfloat16)
-                        return F.linear(x.to(torch.bfloat16), w_bf16, b)
+                        w_bf = _fp8.dequant_blockwise(w, s, is_inv=True)
+                        return F.linear(x.to(torch.bfloat16), w_bf, b)
 
                     return _forward
 
-                is_inverse = scale_attr == "weight_scale_inv"
-                module.forward = _make_blockwise_forward(
-                    fp8_weight, scale_tensor, bias, is_inverse
-                )
-            else:
-                # No scale tensor: simple cast (per-tensor FP8 or unscaled).
-                fp8_weight = module.weight
-                bias = module.bias
+                module.forward = _make_blockwise_forward(w, scale, bias)
+            else:  # per_tensor or unscaled
+                scale = getattr(module, "weight_scale", None)
+                w = module.weight
 
-                def _make_simple_forward(w, b):
+                def _make_per_tensor_forward(w, s, b):
                     def _forward(x):
-                        return F.linear(x.to(torch.bfloat16), w.to(torch.bfloat16), b)
+                        w_bf = _fp8.dequant_per_tensor(w, s)
+                        return F.linear(x.to(torch.bfloat16), w_bf, b)
 
                     return _forward
 
-                module.forward = _make_simple_forward(fp8_weight, bias)
-
+                module.forward = _make_per_tensor_forward(w, scale, bias)
             patched += 1
 
         print(
-            f"* FP8→bf16 dequant: patched [bold]{patched}[/] Linear modules "
+            f"* FP8→bf16 forward dequant: patched [bold]{patched}[/] Linear modules "
             f"(bypasses Triton FP8 kernels for multi-GPU compatibility)"
         )
 

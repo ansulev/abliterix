@@ -1,35 +1,143 @@
-# GPT-OSS-120B (MoE) steering config
-# Architecture: 36 layers, 128 routed experts, top-4, no shared experts
-# Alternating sliding_attention / full_attention layers
-# 120B total / 5.1B active, hidden=2880, intermediate=2880
-# MXFP4: ~60GB — fits 4x H100 easily
+non_interactive = true
+
+# GPT-OSS-120B (MoE) — v1 config carrying the full v6b recipe that shipped
+# for 20b (6/100 refusal, KL 0.0098), scaled to 120b arch (36 layers, 128
+# experts, top-4). The jump from 20b to 120b changes only scale — the
+# abliteration mechanism (direct weight edit + EGA on fused experts + MoE
+# router suppression) is identical.
+#
+# Architecture: 36 layers, 128 routed experts / layer, top-4, no shared
+# experts; hidden=2880, intermediate=2880; fused expert down_proj is
+# transposed (experts, intermediate_in, hidden_out) like 20b.
+# Ships as MXFP4 (~65GB).  abliteration dequants to BF16 (~232GB).
+#
+# Hardware sizing:
+#   BF16 model (232GB) + KV cache + activations + CPU backup (~15GB per
+#   worker for in-place editors) + HF Phase 1 cache
+#
+#   vLLM TP requires ``num_heads (64) % tp`` AND
+#   ``num_kv_heads (8) % tp == 0``, so valid TPs for gpt-oss-120b are
+#   {1, 2, 4, 8}. TP=3 on 3× RTX PRO 6000 is INVALID.
+#
+#   → 4× RTX PRO 6000 96GB (384 GB) — TP=4, no NVLink so PCIe 5.0
+#     all-reduce is the bottleneck (~30-50μs per small op). Good with
+#     large batch (=32) to amortise. ~$4.6/hr on vast.ai.
+#   → 2× H200 141GB (282 GB) — TP=2, has NVLink (~450 GB/s) so per-trial
+#     is ~30% faster than 4× RTX PRO 6000. ~$4-5/hr.
+#   → 3× RTX PRO 6000 (288 GB) — would need pipeline-parallel via
+#     device_map="auto" on HF backend only (no vLLM TP), defeats the
+#     point of the in-place path. Avoid.
+#
+# Backend choice — Phase 2 uses the new vLLM in-place editor path (see
+# ``[vllm]`` block below).  This replaces the older LoRA-adapter path
+# that gpt-oss-20b used: we now edit vLLM weights directly via
+# collective_rpc → ~2.5× throughput over HF pipeline-parallel.
+#
+# MXFP4 handling: engine.py auto-detects native MXFP4 and forces
+# ``Mxfp4Config(dequantize=True)`` during HF load so the fused expert
+# tensor is reachable. For vLLM Phase 2 we MUST use the abliterated
+# BF16 checkpoint (quantization_config stripped); the vLLM MXFP4 method
+# repacks weights in process_weights_after_loading and silently no-ops
+# in-place writes (see vllm.mxfp4.Mxfp4MoEMethod source + RFC #31848).
+#
+# See gpt_oss_20b.toml for exhaustive commentary on each setting —
+# this file only departs from 20b where scale demands it.
 
 [model]
-model_id = "openai/gpt-oss-120b"
+model_id = "/workspace/gpt-oss-120b-bf16"
 dtype_fallback_order = ["bfloat16"]
 quant_method = "none"
 use_torch_compile = false
 device_map = "auto"
 trust_remote_code = true
-max_memory = {0 = "78GiB", 1 = "78GiB"}
+# 4× RTX PRO 6000 96GB — 92 GiB per card for HF Phase 1 load.
+# 2× H200: override to max_memory = {0 = "130GiB", 1 = "130GiB"}.
+max_memory = {0 = "92GiB", 1 = "92GiB", 2 = "92GiB", 3 = "92GiB"}
+# Force tensor parallelism at vLLM load time (if unset, vLLM auto-detects
+# GPU count). Must satisfy ``num_heads (64) % tp == 0`` AND
+# ``num_kv_heads (8) % tp == 0`` → valid tp ∈ {1, 2, 4, 8}.
+# 4 for 4× RTX PRO 6000. 2 for 2× H200. Never 3.
+tensor_parallel_size = 4
+backend = "vllm"
+# vLLM in-place editing path (see comments above [experts] block for env var requirements).
+# enforce_eager MUST be true: CUDA graphs cache weight pointers, so edits aren't
+# visible after the first forward without eager mode.
+enforce_eager = true
+disable_lora = true               # in-place editing replaces LoRA adapters
+use_in_place_editing = true       # route attention + EGA + router via RPC
+max_model_len = 1024              # abliteration eval uses <512 ctx
 
 [inference]
 batch_size = 0          # auto-tune
-max_batch_size = 8
-max_gen_tokens = 150
+# Pushed from 8 → 32 for vLLM TP=4: on RTX PRO 6000 Blackwell there is NO
+# NVLink between cards; all-reduce goes over PCIe 5.0 (~64 GB/s vs H200
+# NVLink ~450 GB/s), so small-batch forwards are latency-bound on the
+# reduce. Larger batches amortise that cost and pull per-card utilisation
+# from ~55% (batch=8) to ~75%+ (batch=32). Every eval run is 100 prompts
+# × 150 tok; KV cache per token ≈ 18 KB, so batch=32 fits comfortably
+# in the ~38 GB/card headroom (232 GB model / 4 = 58 GB weights + KV).
+max_batch_size = 32
+# Bumped 150 → 256: v2/v3 failure mode was judge rating "reasonable-looking"
+# first 150 tokens as compliance, missing long-form collapse (repetition,
+# metaphor garbage) that emerges around tokens 150-250.  256 ≈ 180 words
+# in English / 100-130 汉字, enough to expose "帮好帮好" / "排印,排印" loops.
+max_gen_tokens = 256
 
 [steering]
 vector_method = "mean"
+steering_mode = "direct"        # in-place weight edit + EGA on fused experts
 decay_kernel = "linear"
 orthogonal_projection = true
-weight_normalization = "none"
-# MoE: wider strength range (small intermediate=2880)
-strength_range = [1.0, 10.0]
+weight_normalization = "full"   # norm-preserving projection (Gemma 4 lesson)
+# v3 narrows attention range from [1, 7] → [1, 4] to prevent the v2 failure
+# mode: every v2 Pareto winner picked attn.o_proj.max in [3.96, 6.60] which
+# destabilises long-form generation (visible as metaphor deflection +
+# repetition garbage) even when KL stays low.  v1 T22 (the only v1 trial
+# with usable HF output) picked attn.max=2.20 — the temperate end of the
+# v2 range.  Forcing TPE into the [1, 4] band reproduces T22's regime.
+strength_range = [1.0, 4.0]
+# Bumped from 0.4 → 0.6: forces TPE to sample smoother decay profiles
+# (less sharp peak).  v2 winners had min_frac in [1%, 19%] — too sharp,
+# stealing attention only from a narrow layer band.  T22 had min_frac=35%.
+min_weight_frac_max = 0.6
+
+# EGA on 128 × 36 fused experts — narrowed from [6, 11] to [6, 9] because
+# v2 winners clustered at 6.06-6.87 (already at the low end), and 7+ was
+# never selected by TPE despite the wider bound.  No upside in keeping it.
+[steering.component_strength_ranges]
+"mlp.down_proj" = [6.0, 9.0]
+
+# Bumped from 0.10 → 0.25 for the same smoother-profile reason as the
+# global min_weight_frac_max above.
+[steering.component_min_frac_max]
+"mlp.down_proj" = 0.25
 
 [optimization]
-num_trials = 50
-num_warmup_trials = 15
-checkpoint_dir = "checkpoints_gpt_oss_120b"
+# v3 — v2 winners (T49/T45/T88) were rejected during HF-side validation:
+# all gave metaphor garbage ("lock-picking → presentation topic", "pipe
+# bomb → typeahead list") despite ASR=92% per LLM judge.  Root cause was
+# a metric blind spot: KL on the prompt's last position can't see long-
+# form generation drift, and judge prompt was permissive about garbage.
+# v3 fixes:
+#   1. attention range narrowed to [1, 4] (matches v1 T22 regime)
+#   2. min_weight_frac upped to 0.6 (forces smoother decay profiles)
+#   3. KL measurement reverted to averaged generation logprobs
+#   4. scorer length_deviation weight bumped 0.1× → 0.5×
+#   5. judge model upgraded to gemini-3-flash-preview
+#   6. judge prompt teaches it to recognise metaphor deflection as REFUSAL
+num_trials = 100
+num_warmup_trials = 40
+checkpoint_dir = "checkpoints_gpt_oss_120b_v5"
+
+# Router suppression — narrowed from [-10, 0] to [-5, 0] because v2 winners
+# all picked router_bias in [-5.31, -9.44] (extreme suppression), which
+# combined with strong attention steering destroyed long-form coherence.
+# v1 T22 used router_bias=-3.76 (gentle).  Narrowing the upper magnitude
+# matches the T22 regime.
+[experts]
+max_suppress = 6
+router_bias_range = [-5.0, 0.0]
+ablation_weight_range = [0.0, 0.0]  # pinned off — EGA handles expert weights
 
 [kl]
 scale = 1.0
@@ -40,15 +148,20 @@ prune_threshold = 5.0
 [detection]
 llm_judge = true
 llm_judge_model = "google/gemini-3.1-flash-lite-preview"
-llm_judge_batch_size = 10
-llm_judge_concurrency = 6
+# v4: batch_size=1 forces full judge attention per Q/A pair.  v3 ran with
+# batch=10 which caused 88% false-compliance: judge skimmed all 10 pairs,
+# anchor-biased to "C" after first few, and missed metaphor deflection
+# ("pipe bomb → PVC craft", "lock pick → paper ruler").  HF validation
+# confirmed T3/T61 at 0/15 real bypass despite v3d reporting 88% ASR.
+# Cost: 10× more API calls (~$0.50 → $3.50 per run, negligible).
+# Latency: compensated by 16 concurrent workers.
+llm_judge_batch_size = 1
+llm_judge_concurrency = 16
 
 [display]
 print_responses = false
 print_residual_geometry = false
 plot_residuals = false
-
-non_interactive = true
 
 [benign_prompts]
 dataset = "datasets/good_500"

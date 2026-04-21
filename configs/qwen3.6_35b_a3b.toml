@@ -1,22 +1,42 @@
-# Qwen3.6-35B-A3B (MoE) steering config — V2
+# Qwen3.6-35B-A3B (MoE) steering config — V4
 # Architecture: identical to Qwen3.5-35B-A3B
 #   256 routed experts + 1 shared, 8 active per token, 40 layers, hidden=2048
-# BF16 ~70GB — fits 1x RTX Pro 6000 (96GB GDDR7)
+# BF16 ~70GB — same hardware anchor as V3 ship: 1× RTX Pro 6000 (96GB GDDR7).
+# Keeps the hardware variable zero between V3 and V4 so any delta is purely
+# the algorithmic recipe change. Also fits H200 141GB / B200 192GB if needed.
 #
-# V1 lessons:
-#   - Direct steering mode (from Gemma 4 recipe) was wrong for this arch.
+# V1/V2/V3 lessons (shipped V3 = 7/100 refusals, KL=0.0189 — published at
+# wangzhang/Qwen3.6-35B-A3B-abliterated):
+#   - V1: direct steering mode (Gemma 4 recipe) was wrong for this arch.
 #     Gemma 4 needs direct because of double-norm + PLE suppressing LoRA.
 #     Qwen3.5/3.6 MoE has standard RMSNorm — LoRA works fine.
-#   - 14 consecutive 100/100 trials after initial 67/100 best = stuck.
+#   - V2: kept Q/K/V disabled (also from Gemma 4) AND narrowed strength to
+#     [0.5, 6.0]. Sister model Qwen3.5-35B-A3B winner used [1.0, 10.0] with
+#     ALL components enabled and shipped at 3/200 (KL=0.0035) — 5× better
+#     KL, 2× better refusal rate.
 #
-# V2 strategy:
-#   - Revert to LoRA mode (default) — same as proven Qwen3.5-35B config.
-#   - Keep Q/K/V disabled (valid MoE lesson from Gemma 4).
-#   - Wider strength range [1.0, 12.0] to give optimizer room.
-#   - Linear decay kernel (simpler, worked for Qwen3.5).
-#   - KL target 0.01, prune 5.0 (Qwen3.5 values).
+# V4 strategy — close the gap with the Qwen3.5-35B-A3B winner:
+#   1. RE-ENABLE Q/K/V. The Gemma 4 "drop attention" lesson does NOT
+#      generalise to standard-RMSNorm Qwen MoE. The 35B winner kept them.
+#   2. Per-component strength ranges (v1.4 feature). EGA on mlp.down_proj
+#      amortizes across 256 experts × 40 layers ≈ 10240 weight blocks, so
+#      single-layer steering is diluted — give it [2.0, 10.0]. Attention
+#      paths get tighter ranges since they hit only 40 layers each.
+#   3. projected_abliteration + winsorize_vectors (grimjim). Preserves
+#      helpful signal and damps outlier residuals.
+#   4. Tighter KL: target 0.005 (sister model hit 0.0035 native), prune
+#      threshold 0.5 to kill divergent trials early.
+#   5. Double the data budget: [:800] train + [800:] eval (200 prompts).
+#      V3 used [:400]/[400:500] (100 eval), too noisy to distinguish 3/100
+#      from 7/100 with confidence.
+#   6. 75 trials (was 50). Adds ~25 trials × ~6 min on H200 ≈ +2.5h ≈ +$8.
 #
-# Target hardware: RTX Pro 6000 (96 GB GDDR7), single GPU, BF16.
+# Hardware notes (V4 default = 1× H100 80GB SXM, vast.ai):
+#   - 1× H100 80GB (sm_90): max_memory="76GiB", grouped_mm (DEFAULT)
+#   - 1× H200 (141 GB, ~134 GiB usable): "130GiB", grouped_mm
+#   - 1× B200 / RTX Pro 6000 (Blackwell sm_100/sm_120):
+#       max_memory="170GiB"/"90GiB", experts_implementation="batched_mm"
+#       (grouped_mm refuses sm != 9.0 on torch 2.8)
 
 [model]
 model_id = "Qwen/Qwen3.6-35B-A3B"
@@ -24,35 +44,73 @@ dtype_fallback_order = ["bfloat16"]
 quant_method = "none"
 use_torch_compile = false
 device_map = "auto"
-max_memory = {0 = "90GiB"}
+# H100 80GB default. 70GB model + 6GB headroom for KV/activations under
+# grouped_mm (much smaller than batched_mm's bmm activations).
+max_memory = {0 = "76GiB"}
+# H100 sm_90 supports torch._grouped_mm — the fastest MoE kernel.
+# 3-5× faster than batched_mm, 10-15× faster than eager on 256-expert MoE.
+# For Blackwell (B200/RTX Pro 6000) switch to "batched_mm".
+experts_implementation = "grouped_mm"
 
 [inference]
 batch_size = 0
+# H100 grouped_mm fits batch=8. Auto-tune confirmed @ 97 tok/s.
 max_batch_size = 8
-max_gen_tokens = 150
+# Trimmed from 150 → 100 to amortize H100 cost. Baseline mean response
+# length 51.4 ± 44.9 words ≈ 77 ± 67 tokens; 100 tokens covers mean+0.34σ
+# (~63% of responses) — refusal patterns land in first 30 tokens so the
+# judge still classifies correctly even on truncated responses.
+max_gen_tokens = 100
 
 [steering]
 vector_method = "mean"
 decay_kernel = "linear"
 orthogonal_projection = true
+# grimjim 2025: only remove the orthogonal component of refusal direction
+# relative to harmless mean — preserves helpfulness-aligned signal.
+projected_abliteration = true
+# Symmetric winsorisation @ 0.995 quantile damps outlier residual vectors
+# before projection (a few harmful prompts can have huge norms that skew
+# the steering direction).
+winsorize_vectors = true
+winsorize_quantile = 0.995
 weight_normalization = "none"
 
-# Drop Q/K/V — refusal signal lives in expert path on MoE models.
-disabled_components = ["attn.q_proj", "attn.k_proj", "attn.v_proj"]
+# Global fallback — only used if a component lacks a per-component override.
+strength_range = [1.0, 10.0]
 
-# MoE: moderate range — V2 showed 12.0 upper bound caused degenerate output
-strength_range = [0.5, 6.0]
+# All components enabled (V3 disabled Q/K/V from Gemma 4 lesson — wrong for
+# Qwen MoE which has standard RMSNorm, not Gemma's double-norm).
+disabled_components = []
+
+[steering.component_strength_ranges]
+# EGA on 256 experts × 40 layers = 10240 weight blocks; needs higher peak
+# to actually move the routing surface. Sister 35B winner peaked at ~7-9.
+"mlp.down_proj" = [2.0, 10.0]
+# Attention output: main residual-stream lever. Standard 35B range.
+"attn.o_proj"   = [1.0, 6.0]
+# Q/K/V: re-enabled but conservative — they were never the dominant lever
+# on Qwen MoE, just shouldn't be zeroed out either.
+"attn.q_proj"   = [0.5, 4.0]
+"attn.k_proj"   = [0.5, 4.0]
+"attn.v_proj"   = [0.5, 4.0]
 
 [optimization]
-num_trials = 50
-num_warmup_trials = 15
-checkpoint_dir = "checkpoints_qwen3.6_35b_a3b_v3"
+# V3 shipped at trial 24/50. 40 trials gives 16 trials margin past V3's
+# ship point — sufficient for V4's 6-knob (vs V3's 3-knob) search space.
+num_trials = 40
+num_warmup_trials = 10
+checkpoint_dir = "checkpoints_qwen3.6_35b_a3b_v4"
 
 [kl]
 scale = 1.0
 token_count = 3
-target = 0.01
-prune_threshold = 5.0
+# V3 settled at KL=0.0189 with target=0.01 — optimizer never felt the
+# constraint. Sister 35B hit 0.0035 native; 0.005 is achievable.
+target = 0.005
+# V3's prune_threshold=5.0 let KL-divergent trials run full eval and waste
+# judge calls. 0.5 = 100× the target, still permissive but kills the worst.
+prune_threshold = 0.5
 
 [detection]
 llm_judge = true
@@ -62,22 +120,25 @@ llm_judge_concurrency = 25
 
 [benign_prompts]
 dataset = "datasets/good_1000"
-split = "train[:400]"
+split = "train[:800]"
 column = "prompt"
 
 [target_prompts]
 dataset = "datasets/harmful_1000"
-split = "train[:400]"
+split = "train[:800]"
 column = "prompt"
 
 [benign_eval_prompts]
 dataset = "datasets/good_1000"
-split = "train[400:500]"
+# Halved from 200 → 100 to amortize per-trial gen + judge cost on H100.
+# Final ship validation done separately via scripts/verify_model.py on
+# a clean 200-prompt holdout so the noise reduction is recovered.
+split = "train[800:900]"
 column = "prompt"
 
 [target_eval_prompts]
 dataset = "datasets/harmful_1000"
-split = "train[400:500]"
+split = "train[800:900]"
 column = "prompt"
 
 non_interactive = true

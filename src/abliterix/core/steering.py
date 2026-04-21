@@ -407,23 +407,47 @@ def apply_steering(
                         W = CB.float() * SCB.float().unsqueeze(1) / 127.0
                         engine._dequant_cache[mid] = W
                 elif _FP8_DTYPES and base_weight.dtype in _FP8_DTYPES:
-                    # FP8 block-quantized: dequantise using per-block weight_scale.
+                    # FP8: dequantise to fp32 via block-wise or per-tensor scale.
+                    # Checks `weight_scale_inv` (block-wise; DeepSeek / MiniMax-M2
+                    # / Qwen3-FP8) before `weight_scale` (per-tensor; Qwen2-FP8);
+                    # the previous code only looked for `weight_scale` and
+                    # silently dropped the scale on block-wise models — yielding
+                    # the raw FP8 values cast to fp32 (off by the per-block
+                    # scale factor, destroying the projection).
                     mid = id(mod)
                     if mid in engine._dequant_cache:
                         W = engine._dequant_cache[mid]
                     else:
-                        weight_scale = getattr(mod.base_layer, "weight_scale", None)
-                        if weight_scale is not None:
-                            W = _dequantize_fp8_blockwise(
-                                base_weight.data, weight_scale
+                        from . import fp8_utils as _fp8
+                        scale_inv = getattr(mod.base_layer, "weight_scale_inv", None)
+                        if isinstance(scale_inv, Tensor) and scale_inv.dim() == 2:
+                            W = _fp8.dequant_blockwise(
+                                base_weight.data, scale_inv, is_inv=True,
+                                out_dtype=torch.float32,
                             )
                         else:
-                            W = base_weight.to(torch.float32)
+                            scale = getattr(mod.base_layer, "weight_scale", None)
+                            W = _fp8.dequant_per_tensor(
+                                base_weight.data, scale,
+                                out_dtype=torch.float32,
+                            )
                         engine._dequant_cache[mid] = W
                 else:
                     W = base_weight.to(torch.float32)
 
                 W = W.view(W.shape[0], -1)
+
+                # Shape guard: the steering vector `v` has shape (1, hidden).
+                # For the `v @ W` projection below to be well-defined, we need
+                # `W.shape[0] == hidden` — i.e. the module's output dim must
+                # match the residual stream. Modules with asymmetric output
+                # (GQA q/k/v_proj, MoE routers with shape (num_experts, hidden),
+                # GatedDeltaNet `linear_attn.out_proj` with head_dim-sized
+                # outputs, …) cannot accept a rank-1 hidden-stream update and
+                # must be skipped. Without this guard a mis-registered module
+                # crashes the trial loop at `v @ W`.
+                if W.shape[0] != v.shape[-1]:
+                    continue
 
                 # Optional row normalisation before computing the adapter.
                 norm_mode = config.steering.weight_normalization
@@ -727,6 +751,217 @@ def _apply_ega_steering(
 
         fused.data.copy_(W_new.to(fused.dtype))
         del W_all, W_new, proj
+
+
+# ---------------------------------------------------------------------------
+# vLLM in-place path: same projection math, dispatched to TP workers.
+#
+# Mirrors ``_apply_direct_steering`` + ``_apply_ega_steering`` but instead
+# of editing an HF model's weights locally, this packages the per-layer
+# steering vector + strength into a plan and ships it to every vLLM TP
+# worker via ``collective_rpc``. The math is identical to the HF path
+# (see :func:`_apply_direct_steering` / :func:`_apply_ega_steering`) so
+# the abliteration fingerprint is preserved.
+#
+# Used only when the VLLMGenerator has ``expert_editor`` + ``attention_editor``
+# attached (set up in cli.py when ``[vllm].use_in_place_editing = true``).
+# ---------------------------------------------------------------------------
+
+
+def _save_vec_bytes(v: Tensor) -> bytes:
+    """Serialize a 1-D steering vector for collective_rpc transport."""
+    import io
+    buf = io.BytesIO()
+    torch.save(v.detach().to(dtype=torch.float32, device="cpu"), buf)
+    return buf.getvalue()
+
+
+def _interpolate_strength(
+    layer_idx: int, sp: SteeringProfile, kernel: DecayKernel
+) -> float | None:
+    """Replicate the decay-kernel interpolation used by the HF paths.
+
+    Returns ``None`` when the layer falls outside ``[max_pos ± min_dist]``.
+    """
+    distance = cast(float, abs(layer_idx - sp.max_weight_position))
+    if distance > sp.min_weight_distance:
+        return None
+    t = distance / sp.min_weight_distance
+    if kernel == DecayKernel.GAUSSIAN:
+        return sp.min_weight + (sp.max_weight - sp.min_weight) * math.exp(-2.0 * t * t)
+    if kernel == DecayKernel.COSINE:
+        return sp.min_weight + (sp.max_weight - sp.min_weight) * (
+            0.5 * (1.0 + math.cos(math.pi * t))
+        )
+    return sp.max_weight + t * (sp.min_weight - sp.max_weight)
+
+
+_ATTN_COMPONENTS: tuple[str, ...] = ("q_proj", "k_proj", "v_proj", "o_proj")
+
+
+def _apply_direct_steering_vllm(
+    vllm_gen,
+    steering_vectors: Tensor,
+    global_vector: Tensor | None,
+    profiles: dict[str, SteeringProfile],
+    config: AbliterixConfig,
+    n_layers: int,
+    discriminative_layers: set[int] | None,
+) -> dict:
+    """Apply attention q/k/v/o_proj projection via vLLM TP workers.
+
+    Returns the aggregated RPC response from the attention editor.
+    """
+    kernel = config.steering.decay_kernel
+    norm_preserve = config.steering.weight_normalization != WeightNorm.NONE
+
+    plan: list[dict] = []
+    for layer_idx in range(n_layers):
+        if discriminative_layers is not None and layer_idx not in discriminative_layers:
+            continue
+        for component in _ATTN_COMPONENTS:
+            # Profiles may be keyed as "attn.q_proj" (new) or "q_proj" (legacy).
+            sp = profiles.get(f"attn.{component}") or profiles.get(component)
+            if sp is None:
+                continue
+
+            strength = _interpolate_strength(layer_idx, sp, kernel)
+            if strength is None:
+                continue
+
+            # Pick steering vector for this layer.
+            if global_vector is None:
+                v_layer = steering_vectors[layer_idx + 1]
+            else:
+                v_layer = global_vector
+
+            plan.append({
+                "layer_idx": layer_idx,
+                "component": component,
+                "v": _save_vec_bytes(v_layer),
+                "strength": float(strength),
+            })
+
+    if not plan:
+        return {"applied": 0, "errors": [], "per_layer": []}
+    return vllm_gen.apply_attention_projection(plan, norm_preserve=norm_preserve)
+
+
+def _apply_ega_steering_vllm(
+    vllm_gen,
+    steering_vectors: Tensor,
+    global_vector: Tensor | None,
+    profiles: dict[str, SteeringProfile],
+    config: AbliterixConfig,
+    n_layers: int,
+    hidden_dim: int,
+    transposed: bool,
+    discriminative_layers: set[int] | None,
+) -> dict:
+    """Apply EGA on fused expert down_proj via vLLM TP workers."""
+    sp = profiles.get("mlp.down_proj")
+    if sp is None:
+        return {"applied": 0, "errors": [], "per_layer": []}
+
+    kernel = config.steering.decay_kernel
+    norm_preserve = config.steering.weight_normalization != WeightNorm.NONE
+
+    plan: list[dict] = []
+    for layer_idx in range(n_layers):
+        if discriminative_layers is not None and layer_idx not in discriminative_layers:
+            continue
+        strength = _interpolate_strength(layer_idx, sp, kernel)
+        if strength is None:
+            continue
+
+        if global_vector is None:
+            v_layer = steering_vectors[layer_idx + 1]
+        else:
+            v_layer = global_vector
+
+        plan.append({
+            "layer_idx": layer_idx,
+            "v": _save_vec_bytes(v_layer),
+            "strength": float(strength),
+            "hidden_dim": hidden_dim,
+            "transposed": transposed,
+        })
+
+    if not plan:
+        return {"applied": 0, "errors": [], "per_layer": []}
+    return vllm_gen.apply_ega_projection(plan, norm_preserve=norm_preserve)
+
+
+def apply_steering_vllm_inplace(
+    vllm_gen,
+    steering_vectors: Tensor,
+    vector_index: float | None,
+    profiles: dict[str, SteeringProfile],
+    config: AbliterixConfig,
+    n_layers: int,
+    hidden_dim: int,
+    transposed: bool = False,
+    safety_experts: dict[int, list[tuple[int, float]]] | None = None,
+    routing_config: ExpertRoutingConfig | None = None,
+) -> dict:
+    """End-to-end ``apply_steering`` for the vLLM in-place path.
+
+    Replaces the HF-engine version when vLLM is attached with BOTH
+    ``expert_editor`` and ``attention_editor``. Also triggers the existing
+    router suppression path (via ``moe_editor``) if safety experts were
+    profiled.
+
+    Returns a diagnostic dict summarising how many layers each editor
+    touched — useful for a first-trial sanity log.
+    """
+    # Resolve global vector identically to HF path.
+    if vector_index is None or steering_vectors.ndim == 3:
+        global_vector = None
+    else:
+        fractional, integral = math.modf(vector_index + 1)
+        global_vector = F.normalize(
+            steering_vectors[int(integral)].lerp(
+                steering_vectors[int(integral) + 1], fractional
+            ),
+            p=2, dim=0,
+        )
+
+    attn_result = _apply_direct_steering_vllm(
+        vllm_gen, steering_vectors, global_vector, profiles, config,
+        n_layers=n_layers, discriminative_layers=None,
+    )
+    ega_result = _apply_ega_steering_vllm(
+        vllm_gen, steering_vectors, global_vector, profiles, config,
+        n_layers=n_layers, hidden_dim=hidden_dim, transposed=transposed,
+        discriminative_layers=None,
+    )
+
+    router_touched = 0
+    if safety_experts and routing_config is not None:
+        if routing_config.n_suppress > 0 and routing_config.router_bias < 0:
+            router_touched = vllm_gen.apply_router_suppression(
+                n_suppress=routing_config.n_suppress,
+                bias_value=routing_config.router_bias,
+            )
+
+    return {
+        "attention": attn_result,
+        "ega": ega_result,
+        "router_touched": router_touched,
+    }
+
+
+def restore_all_vllm_inplace(vllm_gen) -> dict:
+    """Restore every in-place edit applied by :func:`apply_steering_vllm_inplace`.
+
+    Safe to call even if nothing was applied — each editor's ``restore()``
+    is a no-op in that case.
+    """
+    return {
+        "attention": vllm_gen.restore_attention_weights(),
+        "ega": vllm_gen.restore_expert_weights(),
+        "router": vllm_gen.restore_router_suppression(),
+    }
 
 
 # ---------------------------------------------------------------------------

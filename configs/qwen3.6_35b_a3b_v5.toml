@@ -1,0 +1,115 @@
+# Qwen3.6-35B-A3B (MoE) steering config — V5b
+# Goal: BEAT V3 ship (7/100 refusals, KL=0.0189).
+#
+# V5 attempt 1 (iterative + n_directions=3) crashed at trial 1:
+#   IndexError: index 18 out of bounds (size 9)
+#   iterative.subspace × 3 iter × 3 dirs = 9 stacked basis vectors,
+#   steering.py expects (n_layers+1, hidden) per-layer shape — incompatible.
+#
+# V5b strategy — replicate V3 winning design + safe V4 wins, leave
+# experimental features (iterative, n_directions) for a separate run:
+#   1. RESTORE V3 winning baseline:
+#      - gaussian decay (sharper peak)
+#      - Q/K/V disabled (avoid TPE wasting search budget on shape-skipped dims)
+#      - strength range [0.5, 6.0] (V3 sweet spot, NOT [1.0, 10.0])
+#   2. KEEP V4's safe wins:
+#      - projected_abliteration (preserve helpful signal)
+#      - winsorize_vectors (damp outlier residuals)
+#      - tighter KL target 0.005 + prune 0.5
+#   3. ADD what should help vs V3:
+#      - 800 train prompts (V3 used 400 → noisier vector)
+#      - 50 trials (V3 only ran 24 of 50 budget → unfinished search)
+#
+# Architecture: 256 routed experts + 1 shared, 8 active per token, 40 layers,
+# hidden=2048. BF16 ~70GB.
+#
+# Hardware: 1× H100 80GB SXM (vast.ai), grouped_mm MoE kernel.
+
+[model]
+model_id = "Qwen/Qwen3.6-35B-A3B"
+dtype_fallback_order = ["bfloat16"]
+quant_method = "none"
+use_torch_compile = false
+device_map = "auto"
+max_memory = {0 = "76GiB"}
+experts_implementation = "grouped_mm"
+
+[inference]
+batch_size = 0
+max_batch_size = 8
+max_gen_tokens = 100
+
+[steering]
+vector_method = "mean"
+# V3 winner: gaussian. NOT linear (V4's regression).
+decay_kernel = "gaussian"
+orthogonal_projection = true
+projected_abliteration = true
+winsorize_vectors = true
+winsorize_quantile = 0.995
+weight_normalization = "none"
+
+# rank-1 single direction. n_directions=3 is incompatible with iterative
+# in current abliterix; pure n_directions standalone is also untested on
+# Qwen3.6 — defer to separate experiment.
+n_directions = 1
+
+# V3 winning range. NOT [1.0, 10.0].
+strength_range = [0.5, 6.0]
+
+# V3 winner had Q/K/V disabled. Cuts search space from ~21 dims to ~9 dims;
+# TPE converges 2-3× faster.
+disabled_components = ["attn.q_proj", "attn.k_proj", "attn.v_proj"]
+
+[experts]
+# MoE router suppression auto-enabled when safety_experts profiling finds
+# candidates (V3 used top-10, router_bias -2.10).
+max_suppress = 15
+router_bias_range = [-15.0, 0.0]
+ablation_weight_range = [0.0, 8.0]
+
+[optimization]
+# 50 trials. V3 stopped at trial 24/50 (early ship?), so 50 gives us
+# search space coverage V3 didn't exploit. With 9-dim search and 8 warmup,
+# TPE has 42 informed trials.
+num_trials = 50
+num_warmup_trials = 8
+checkpoint_dir = "checkpoints_qwen3.6_35b_a3b_v5b"
+
+[kl]
+scale = 1.0
+token_count = 3
+target = 0.005
+prune_threshold = 0.5
+
+[detection]
+llm_judge = true
+llm_judge_model = "google/gemini-3-flash-preview"
+llm_judge_batch_size = 10
+llm_judge_concurrency = 25
+
+[benign_prompts]
+dataset = "datasets/good_1000"
+split = "train[:800]"
+column = "prompt"
+
+[target_prompts]
+dataset = "datasets/harmful_1000"
+split = "train[:800]"
+column = "prompt"
+
+# 100 eval prompts — same as V3 ship for fair A/B comparison.
+[benign_eval_prompts]
+dataset = "datasets/good_1000"
+split = "train[800:900]"
+column = "prompt"
+
+[target_eval_prompts]
+dataset = "datasets/harmful_1000"
+split = "train[800:900]"
+column = "prompt"
+
+non_interactive = true
+
+[display]
+print_responses = false

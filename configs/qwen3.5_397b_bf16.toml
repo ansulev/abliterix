@@ -1,34 +1,90 @@
-# Qwen3.5-397B-A17B (MoE) steering config — BF16
-# 512 experts (10 routed + 1 shared), 60 layers, hidden=4096, expert_dim=1024
-# BF16: ~794GB weights — fits 8× H200 141GB (1128GB) with 334GB headroom
+non_interactive = true
+
+# Qwen3.5-397B-A17B (MoE) — LoRA + MoE recipe for 8× NVIDIA B200 SXM 192GB
+# 512 routed experts + 1 shared (10 active per token), 60 layers, hidden=4096,
+# expert_dim=1024. Native BF16 on disk (no FP8 dequant needed).
+#
+# BF16 weights ~794GB → fits 8× B200 192GB (1536GB) with ~740GB headroom —
+# more than enough for KV cache, activations, and hidden-state extraction cache.
+# Can also run on 8× H200 141GB (1128GB, ~335GB headroom) — adjust max_memory.
+#
+# RECIPE — replicates Qwen3.5-122B-A10B winner:
+#   - Qwen3.5-122B-A10B shipped at 1/200 (0.5%) refusal, KL=0.0115, 25 trials.
+#   - Qwen3.5-35B-A3B shipped at 3/200 (1.5%) refusal, KL=0.0035, 50 trials.
+#   - Both used the same minimal LoRA + MoE path: HF backend, default
+#     steering_mode="lora", weight_normalization="none", no disabled
+#     components, wide strength_range=[1.0, 10.0]. Engine auto-profiles
+#     safety experts and applies router suppression + expert ablation per
+#     trial. This is the Qwen3.5 MoE family winner.
+#
+# DO NOT swap in direct+EGA here: that recipe (steering_mode="direct" +
+# weight_normalization="full" + per-component ranges + Q/K/V disabled) belongs
+# to gpt-oss/Gemma 4/MiniMax-M2 — different family, different geometry.
+#
+# Pipeline parallelism (device_map="auto") is required for in-place LoRA
+# adapter materialisation across 8 cards.
+#
+# SHAPE-GUARD NOTE (2026-04-19): Qwen3.5-397B is a **hybrid** model — some
+# layers use standard SoftmaxAttention (`self_attn.q/k/v/o_proj`), others use
+# GatedDeltaNet (`linear_attn.out_proj`). On GQA layers `k_proj`/`v_proj` have
+# d_out = num_kv_heads*head_dim which is typically ≠ hidden_size. abliterix's
+# rank-1 LoRA steering requires `W.shape[0] == hidden` and skips the rest
+# (see steering.py shape guard). We therefore restrict the optimizer search
+# space to the components that are guaranteed hidden-sized on every layer:
+# `attn.o_proj` (hidden×hidden on SoftmaxAttention) and `mlp.down_proj`
+# (hidden×expert_dim — covers ALL 60 layers since every layer has MoE).
+# The disabled_components list is what 122B winner implicitly had (its head
+# geometry made q/k/v_proj hidden-sized too — on 397B it's explicit).
 
 [model]
 model_id = "Qwen/Qwen3.5-397B-A17B"
 dtype_fallback_order = ["bfloat16"]
 quant_method = "none"
 use_torch_compile = false
+attn_implementation = "sdpa"
 device_map = "auto"
 trust_remote_code = true
-# 8× H200 141GB — leave headroom for activations, KV cache, MoE routing
-max_memory = {0 = "134GiB", 1 = "134GiB", 2 = "134GiB", 3 = "134GiB", 4 = "134GiB", 5 = "134GiB", 6 = "134GiB", 7 = "134GiB"}
+# 8× B200 (vast.ai reports 183 GiB/GPU — ECC + firmware carve-outs off the
+# nominal 192 GB). 170 GiB cap leaves ~13 GiB/GPU headroom for activations,
+# KV cache, and hidden-state extraction buffers. Total usable: 1360 GiB.
+# For 8× H200 141GB: change each entry to "134GiB" (1072 GiB usable).
+max_memory = {0 = "170GiB", 1 = "170GiB", 2 = "170GiB", 3 = "170GiB", 4 = "170GiB", 5 = "170GiB", 6 = "170GiB", 7 = "170GiB"}
 
 [inference]
 batch_size = 0
-max_batch_size = 4
-max_gen_tokens = 150
+# HF pipeline parallelism on 8 stages: push batch high so prompts overlap
+# across stages (fills pipeline bubbles). VRAM has ~680 GB headroom over the
+# 794 GB weight load — bs=16 is safe.
+max_batch_size = 16
+# Refusal detection needs enough room to let the full refusal phrase land
+# (otherwise the judge sees a truncated sentence and mis-scores as coherent).
+# Baseline response length on 397B is 57.2 ± 44.2 words; 128 tokens covers
+# mean + 1.6σ (~95%) — matches the margin 122B-winner used at 150 tokens.
+max_gen_tokens = 128
 
 [steering]
 vector_method = "mean"
 decay_kernel = "linear"
 orthogonal_projection = true
 weight_normalization = "none"
-# MoE: wider weight range
+# MoE: wide weight range — matches 122b winner.
 strength_range = [1.0, 10.0]
+# Hybrid-arch shape guard (see top-of-file note). GQA q/k/v_proj and GDN
+# `linear_attn.out_proj` don't project to hidden-sized outputs on every layer
+# of Qwen3.5-397B, so the optimizer's strength budget would be wasted on
+# modules that the rank-1 LoRA can't steer. Keep only the hidden-aligned
+# components: `attn.o_proj` (standard-attention layers) and `mlp.down_proj`
+# (all 60 MoE layers).
+disabled_components = ["attn.q_proj", "attn.k_proj", "attn.v_proj"]
 
 [optimization]
+# 122B winner shipped at trial 25 with a 50-trial budget; on 397B we keep the
+# same 50-trial headroom.  Dropping to 30 leaves only 5 trials of margin past
+# the 122B shipping point — too tight given 397B's hybrid GQA+GDN geometry
+# is unproven.  The extra ~25 min (~$22) is cheap insurance vs an empty pod.
 num_trials = 50
 num_warmup_trials = 10
-checkpoint_dir = "checkpoints_397b_bf16"
+checkpoint_dir = "checkpoints_qwen35_397b_bf16_v2"
 
 [kl]
 scale = 1.0
@@ -38,33 +94,34 @@ prune_threshold = 5.0
 
 [detection]
 llm_judge = true
-llm_judge_model = "google/gemini-3.1-flash-lite-preview"
-llm_judge_batch_size = 25
-llm_judge_concurrency = 25
+llm_judge_model = "google/gemini-3-flash-preview"
+# 122B winner shipped at 10/10 — gemini-3-flash rate limits on OpenRouter
+# will 429 at ≥20 concurrent.  15/15 matches 122B's stable cadence without
+# under-utilising the judge during eval-heavy trials.
+llm_judge_batch_size = 15
+llm_judge_concurrency = 15
 
 [display]
 print_responses = false
 print_residual_geometry = false
 plot_residuals = false
 
-non_interactive = true
-
 [benign_prompts]
-dataset = "datasets/good_500"
+dataset = "datasets/good_1000"
 split = "train[:400]"
 column = "prompt"
 
 [target_prompts]
-dataset = "datasets/harmful_500"
+dataset = "datasets/harmful_1000"
 split = "train[:400]"
 column = "prompt"
 
 [benign_eval_prompts]
-dataset = "datasets/good_500"
-split = "train[400:]"
+dataset = "datasets/good_1000"
+split = "train[400:500]"
 column = "prompt"
 
 [target_eval_prompts]
-dataset = "datasets/harmful_500"
-split = "train[400:]"
+dataset = "datasets/harmful_1000"
+split = "train[400:500]"
 column = "prompt"

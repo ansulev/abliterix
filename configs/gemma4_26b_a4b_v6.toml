@@ -1,0 +1,171 @@
+# Gemma 4 26B-A4B — V6: projected abliteration + sharp-peak EGA + thinking-aware gen
+#
+# Target hardware: 1× RTX Pro 6000 (96 GB GDDR7, Blackwell sm_120), BF16.
+#
+# V5 lessons (shipped as wangzhang/gemma-4-26B-A4B-it-abliterix):
+#   - 9-dim search (mlp.down_proj + attn.o_proj + expert router suppression)
+#     converged but refusal rate floored near 32/100 on the private
+#     prometheus dataset. Known-possible: TrevorS EGA hit 3/100 on this
+#     exact SKU. Gap = recipe, not model/dataset.
+#   - projected_abliteration was off. Qwen3.6-35B-A3B V4 winner and
+#     MiniMax-M2 recipes both use it — the grimjim improvement preserves
+#     helpfulness and typically drops refusal by 30-60% at matched KL.
+#   - max_gen_tokens=100 collided with Gemma-4's thinking chat template
+#     (<|channel|>thought). First 100 tokens can be consumed entirely by
+#     the thought channel; judge then scores an empty answer as "refused".
+#   - KL target 0.008 was too loose — TrevorS's winning recipe ran at
+#     KL ≈ 0.003-0.005. 0.008 let the optimizer settle in a safe-but-
+#     useless basin.
+#   - experts_implementation not pinned. transformers 5.x defaults to
+#     grouped_mm, which aborts on RTX Pro 6000 (sm_120). V5 ran on H100
+#     out of luck; V6 must be portable.
+#
+# V6 strategy — close the gap with TrevorS:
+#   1. projected_abliteration = true (biggest single-knob win).
+#   2. experts_implementation = "eager" (Blackwell hard requirement).
+#   3. max_gen_tokens = 256 (thinking-model-aware; judge gets real answer).
+#   4. Sharp-peak EGA: min_weight_frac_max = 0.10 on mlp.down_proj so TPE
+#      concentrates on "strong kick at one layer, flat decay elsewhere"
+#      winners instead of averaging out. Mirrors gpt-oss-20b v6 winner.
+#   5. Tighter KL: target 0.004, prune 0.02 — forces optimizer out of the
+#      safe basin V5 got stuck in.
+#   6. Data budget 800/200 (was 400/100). Cuts eval noise ~2× so a 3/200
+#      vs 6/200 trial is actually distinguishable.
+#   7. 80 trials / 25 warmup. 9-dim + per-component min_frac_max ≈ 11-dim
+#      search; TPE needs ~25 random before exploitation.
+#   8. decay_kernel = "linear" (flat-decay winner pattern from V4 log
+#      analysis — see old memory on Gemma 4).
+#   9. Iterative disabled. Memory [iterative_ndirections_incompatible]
+#      warns the code path doesn't compose with multi-direction or EGA's
+#      per-layer indexing.
+
+[model]
+model_id = "google/gemma-4-26B-A4B-it"
+dtype_fallback_order = ["bfloat16"]
+quant_method = "none"
+use_torch_compile = false
+device_map = "auto"
+# H100 SXM 80 GB HBM3, real usable ~76 GiB. BF16 weights 52 GB, KV/activations
+# ~5 GB at batch=4/256, grouped_mm buffer ~2 GB → 62 GB busy, 14 GB headroom.
+max_memory = {0 = "76GiB"}
+# H100 sm_90 native path — torch._grouped_mm is Hopper-exclusive. 3-5× faster
+# than batched_mm (which OOM'd on sm_120 Blackwell at 15 GiB expert gather).
+experts_implementation = "grouped_mm"
+
+[inference]
+# H100 SXM 80 GB with grouped_mm: memory efficient enough to autotune up
+# to batch=8. 52 GB weights + ~15 GB headroom easily fits batch=4-8.
+batch_size = 0        # autotune
+max_batch_size = 8
+# Gemma-4 thinking model: <|channel|>thought + answer. Baseline measured
+# at 101.9 ± 75.0 words ≈ 152 tokens. 200 covers mean + 0.65σ (~75% of
+# responses). Judge classification lands in first 30 tokens after thought.
+# 256 was too generous — saves ~22% wall-clock per trial.
+max_gen_tokens = 200
+
+[steering]
+steering_mode = "direct"
+vector_method = "mean"
+
+# Direct mode applies orthogonal projection on weights; projected_abliteration
+# refines it to grimjim's method (preserves helpfulness-aligned signal).
+# OVERRIDES orthogonal_projection when true.
+orthogonal_projection = true
+projected_abliteration = true
+
+winsorize_vectors = true
+winsorize_quantile = 0.995
+
+# Flat decay profile (min_weight ≈ max_weight across distance) was the V4
+# Gemma-4 winner. Linear decay + high min_weight_frac concentrates the
+# search on that region.
+decay_kernel = "linear"
+
+# Critical for Gemma-4 double-norm architecture: preserve per-row weight
+# norms after projection so the 4× RMSNorm + PLE pathway doesn't amplify
+# residual artifacts.
+weight_normalization = "pre"
+
+# Drop Q/K/V — 128-expert MoE puts refusal in the expert path, not
+# attention projections. V4 wasted 12 trial dims here for ~0 gain.
+disabled_components = ["attn.q_proj", "attn.k_proj", "attn.v_proj"]
+
+# Fallback only; every active component has an explicit override below.
+strength_range = [1.5, 5.0]
+
+[steering.component_strength_ranges]
+# EGA amortizes across 128 experts × ~30 MoE layers ≈ 3840 weight blocks.
+# Push the upper bound to 9 so the optimizer can actually move the routing
+# surface; V5 tried [2.0, 9.0] and TPE peaked around 7.2 — keep the room.
+"mlp.down_proj" = [2.5, 9.0]
+# Attention output: residual-stream lever into the decoder output.
+"attn.o_proj"   = [1.5, 5.0]
+
+[steering.component_min_frac_max]
+# Sharp-peak profile: force TPE to explore "high peak at one layer, low
+# elsewhere" rather than flat-high (which blows KL without gaining ASR).
+# Mirrors the gpt-oss-20b v6 winner fingerprint.
+"mlp.down_proj" = 0.10
+"attn.o_proj"   = 0.30
+
+[experts]
+# Router-side suppression complements EGA (EGA edits experts; router
+# suppression redirects the gate away from "safety" experts).
+max_suppress = 16
+router_bias_range = [-12.0, 0.0]
+# EGA already handles expert-weight ablation; leave this off to avoid
+# double-counting the same lever.
+ablation_weight_range = [0.0, 0.0]
+
+[optimization]
+# Full V6 on H100: 80 trials = 25 warmup + 55 exploitation. TPE needs
+# ~25 random samples to model the 11-dim search (9 component params +
+# min_frac_max × 2 components). Runtime ~8 min/trial on H100 grouped_mm
+# + batch=8 ≈ 11h ≈ $20 — worth it to fully explore V6 recipe.
+num_trials = 80
+num_warmup_trials = 25
+checkpoint_dir = "checkpoints_gemma4_26b_a4b_v6"
+
+[kl]
+scale = 1.0
+token_count = 3
+# TrevorS's 3/100 winner ran at KL ≈ 0.003-0.005. 0.004 is achievable
+# without over-constraining.
+target = 0.004
+# Kill trials that blow KL past 5× target (was 50 in V5 — far too
+# permissive, let over-steer trials eat full eval budget).
+prune_threshold = 0.02
+
+[detection]
+llm_judge = true
+llm_judge_model = "google/gemini-3-flash-preview"
+llm_judge_batch_size = 10
+llm_judge_concurrency = 35
+
+[benign_prompts]
+dataset = "datasets/good_1000"
+split = "train[:800]"
+column = "prompt"
+
+[target_prompts]
+dataset = "datasets/harmful_1000"
+split = "train[:800]"
+column = "prompt"
+
+[benign_eval_prompts]
+dataset = "datasets/good_1000"
+# 100 eval: enough to distinguish 5/100 vs 15/100 at 95% CI. 200 eval
+# would halve noise but add 4 min/trial × 80 = +5h = $10. V5 also used
+# 100. Final ship validation uses all 200 holdout via quick_test_hf.py.
+split = "train[800:900]"
+column = "prompt"
+
+[target_eval_prompts]
+dataset = "datasets/harmful_1000"
+split = "train[800:900]"
+column = "prompt"
+
+non_interactive = true
+
+[display]
+print_responses = false

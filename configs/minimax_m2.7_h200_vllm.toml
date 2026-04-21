@@ -1,0 +1,88 @@
+non_interactive = true
+
+# MiniMax-M2.7 (MoE) — vLLM TP=4 + LoRA on local BF16 model
+# Local BF16 = pre-dequanted from FP8, stored at /workspace/minimax_m27_bf16 (457GB)
+# Using vLLM TP=4 across 4× H200 SXM for 10x+ speed vs HF PP.
+# LoRA steering mode (same as Qwen3.6-35B 93% ASR recipe — no direct/EGA needed).
+
+[model]
+model_id = "/workspace/minimax_m27_bf16"
+dtype_fallback_order = ["bfloat16"]
+quant_method = "none"
+use_torch_compile = false
+device_map = "auto"
+trust_remote_code = true
+max_memory = {0 = "135GiB", 1 = "135GiB", 2 = "135GiB", 3 = "135GiB"}
+
+# ─── vLLM backend ────────────────────────────────────────────────────────────
+backend = "vllm"
+tensor_parallel_size = 4
+enable_expert_parallel = false
+enable_chunked_prefill = true
+enforce_eager = true              # LoRA shrink dtype assert workaround
+gpu_memory_utilization = 0.90
+kv_cache_dtype = "bfloat16"       # BF16 model → BF16 KV (no FP8 kv)
+max_model_len = 4096
+max_num_seqs = 64
+
+[inference]
+batch_size = 0
+max_batch_size = 64
+max_gen_tokens = 64
+
+[steering]
+# Default steering_mode = "lora" (no direct, no EGA)
+vector_method = "mean"
+n_directions = 1
+orthogonal_projection = true
+winsorize_vectors = true
+winsorize_quantile = 0.995
+discriminative_layer_selection = true
+decay_kernel = "linear"
+weight_normalization = "none"
+strength_range = [0.5, 6.0]
+
+# MoE: drop Q/K/V (Qwen3.6 lesson — refusal signal lives in expert path)
+disabled_components = ["attn.q_proj", "attn.k_proj", "attn.v_proj"]
+
+[optimization]
+num_trials = 50
+num_warmup_trials = 15
+checkpoint_dir = "checkpoints_minimax_m27_vllm_v1"
+
+[kl]
+scale = 1.0
+token_count = 3
+target = 0.01
+prune_threshold = 5.0
+
+[detection]
+llm_judge = true
+llm_judge_model = "google/gemini-3.1-flash-lite-preview"
+llm_judge_batch_size = 10
+llm_judge_concurrency = 25
+
+[display]
+print_responses = false
+print_residual_geometry = false
+plot_residuals = false
+
+[benign_prompts]
+dataset = "datasets/good_1000"
+split = "train[:400]"
+column = "prompt"
+
+[target_prompts]
+dataset = "datasets/harmful_1000"
+split = "train[:400]"
+column = "prompt"
+
+[benign_eval_prompts]
+dataset = "datasets/good_1000"
+split = "train[400:500]"
+column = "prompt"
+
+[target_eval_prompts]
+dataset = "datasets/harmful_1000"
+split = "train[400:500]"
+column = "prompt"

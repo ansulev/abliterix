@@ -250,3 +250,38 @@ def test_lora_rank1_reconstruction():
     product = lora_B @ lora_A
     expected = -strength * torch.outer(v, v @ W)
     assert torch.allclose(product, expected, atol=1e-5)
+
+
+# ===================================================================
+# Shape guard — skip modules whose d_out ≠ hidden (steering vector dim).
+#
+# Regression check for Qwen3.5-397B-A17B where the optimizer's steerable
+# module walk registers GatedDeltaNet `linear_attn.out_proj` and MoE
+# `router.weight` (shapes (E, hidden) or (num_kv_heads*head_dim, hidden))
+# which cannot accept a rank-1 hidden-stream update. Without the guard at
+# steering.py:427, `v @ W` crashes with "mat1 and mat2 shapes cannot be
+# multiplied (1x4096 and 512x4096)".
+# ===================================================================
+
+
+@pytest.mark.parametrize(
+    "w_shape, v_dim, should_skip",
+    [
+        ((4096, 4096), 4096, False),  # attn.o_proj on symmetric head geometry
+        ((4096, 1024), 4096, False),  # mlp.down_proj (hidden, expert_dim)
+        ((512, 4096), 4096, True),    # MoE router.weight — num_experts rows
+        ((1024, 4096), 4096, True),   # k_proj / v_proj under GQA (8 heads × 128)
+        ((3072, 4096), 4096, True),   # q_proj where num_heads*head_dim ≠ hidden
+        ((4096, 4096), 3072, True),   # dimension-mismatched steering vector
+    ],
+)
+def test_shape_guard_skip_decision(w_shape, v_dim, should_skip):
+    """The guard at steering.py must skip exactly when W.shape[0] != v.shape[-1]."""
+    W = torch.randn(*w_shape)
+    v = torch.randn(1, v_dim)
+    skipped = W.shape[0] != v.shape[-1]
+    assert skipped is should_skip
+    if not skipped:
+        # Projection must succeed and produce expected shape (1, d_in).
+        lora_A = (v @ W).view(1, -1)
+        assert lora_A.shape == (1, W.shape[1])

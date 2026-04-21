@@ -82,10 +82,31 @@ min_weight_frac_max = 0.4
 # more random samples to model the joint distribution well. v1 trial 1 was
 # the 1st warmup hit; we want more chances at similar lucky samples plus
 # strong TPE refinement after.
+# v6: v5 shipped but refusal not fully zero on edge prompts.  Two additions
+# target the remaining refusal:
+#   1. [experts] block — enables router suppression in addition to EGA.
+#      EGA alone modifies experts; router suppression also *redirects away*
+#      from safety experts, a complementary mechanism.
+#   2. Bumped num_trials 50→100, warmup 25→40 — EGA + router is a 5-D
+#      search space, TPE needs ~40 random samples to model the joint.
+#
+# NOT using iterative: iterative_abliterate returns a rank-N subspace tensor
+# (all passes' directions concatenated), not per-layer vectors — incompatible
+# with EGA's per-layer indexing (steering.py:699 does vectors[layer_idx+1]).
+# Iterative belongs to a future experiment where we disable EGA.
 [optimization]
-num_trials = 50
-num_warmup_trials = 25
-checkpoint_dir = "checkpoints_gpt_oss_20b_v5"
+num_trials = 100
+num_warmup_trials = 40
+checkpoint_dir = "checkpoints_gpt_oss_20b_v6b"
+
+# Router suppression search bounds.  gpt-oss-20b has 32 experts × 24 layers.
+# max_suppress=6 = suppress top-6 safety experts per layer (19% of experts).
+# router_bias_range=[-10, 0] gives full range from no-op (0) to total
+# exclusion (-10 → scale=0).
+[experts]
+max_suppress = 6
+router_bias_range = [-10.0, 0.0]
+ablation_weight_range = [0.0, 0.0]  # pinned off — EGA handles expert weights
 
 [kl]
 scale = 1.0

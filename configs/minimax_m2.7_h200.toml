@@ -1,0 +1,122 @@
+# MiniMax-M2.7 (MoE) — vLLM dual-phase config for 2× NVIDIA H200 SXM 141GB
+# 256 experts (8 routed), 62 layers, hidden=3072, expert_dim=1536
+# FP8: ~230GB weights → TP=2 → ~115GB/GPU, ~26GB raw headroom per GPU (141 - 115)
+#
+# Target hardware: 2× NVIDIA H200 SXM (143GB HBM3e, NVLink NV18 full-bandwidth
+# bundle between the two GPUs — ~900 GB/s collective comms). Driver 570 /
+# CUDA 12.8 class pod → vLLM 0.19.0 stable; Phase 1 falls back to HF PP (2-GPU
+# pipeline, 1 active at a time). Phase 2 runs at full TP=2 NVLink speed.
+#
+# TP must divide num_kv_heads=8. Valid: 1, 2, 4, 8. TP=2 is the only option here.
+#
+# NOTE: MoE expert-weight ablation (EGA on fused experts) is NOT supported in
+# vLLM mode — only router suppression + LoRA weight steering. Sufficient for
+# refusal abliteration on MoE per the Qwen3.5-122B / gpt-oss-20b playbooks.
+
+[model]
+model_id = "MiniMaxAI/MiniMax-M2.7"
+dtype_fallback_order = ["auto"]
+quant_method = "fp8"
+skip_fp8_dequant = true
+attn_implementation = "flash_attention_2"
+use_torch_compile = false
+device_map = "auto"
+trust_remote_code = true
+# Phase 1 HF fallback: each H200 has 143GB, leave ~8GB headroom for activations.
+max_memory = {0 = "135GiB", 1 = "135GiB"}
+
+# ─── vLLM backend (both phases) ──────────────────────────────────────────────
+backend = "vllm"
+tensor_parallel_size = 2
+# LoRA re-enabled; vLLM lora_shrink dtype assert is neutralized by the
+# abliterix_vllm_patch.pth auto-load that casts inputs to lora_a dtype inside
+# the kernel. Combined with bf16 LoRA save + router suppression, this gives
+# full attention-LoRA + MoE-router-scale steering on MiniMax-M2.
+# disable_lora = true  # commented out — LoRA is ON
+# H200 141GB × 0.93 = 131GB usable → 115GB weights + ~16GB KV/LoRA/CUDA-graphs.
+# Push to 0.93 because NVLink NV18 means less overhead reserved for NCCL buffers
+# compared to PCIe fabrics; bump down to 0.90 if OOM during warmup.
+gpu_memory_utilization = 0.93
+# Expert parallel disabled at TP=2. TP-sharded FusedMoE uses the same memory
+# but avoids all-to-all token dispatch; at TP=2 the memory tradeoff is nil.
+enable_expert_parallel = false
+enable_chunked_prefill = true
+# NOTE: enforce_eager=true is a workaround for a vLLM nightly bug where
+# LoRA shrink op asserts inputs.dtype == lora_a_weights[0].dtype during CUDA
+# graph capture. Disabling cudagraphs loses ~10% throughput but is the
+# stable path for MoE + LoRA on vLLM 0.19.2rc1.
+enforce_eager = true
+# Hopper H200 has native FP8 tensor cores. FP8 KV cache halves memory.
+kv_cache_dtype = "fp8_e4m3"
+# Cap sequence length — abliteration prompts + gen < 2K, don't waste KV.
+max_model_len = 4096
+# With ~16GB KV/GPU at max_model_len=4096 + fp8 KV, ~64 seqs fit comfortably.
+# 400 prompts → 7 waves, batch-compute dominates over wave overhead.
+max_num_seqs = 64
+
+[inference]
+batch_size = 0
+max_batch_size = 64
+# Refusal detection only needs ~30-50 tokens; cap at 64 to halve gen cost.
+max_gen_tokens = 64
+
+[steering]
+steering_mode = "direct"
+vector_method = "mean"
+n_directions = 1
+orthogonal_projection = true
+projected_abliteration = true
+winsorize_vectors = true
+winsorize_quantile = 0.995
+discriminative_layer_selection = true
+decay_kernel = "gaussian"
+weight_normalization = "none"
+strength_range = [1.0, 10.0]
+disabled_components = ["attn.q_proj", "attn.k_proj", "attn.v_proj"]
+[steering.component_strength_ranges]
+"mlp.down_proj" = [2.0, 10.0]
+"attn.o_proj" = [1.0, 5.0]
+
+[optimization]
+num_trials = 50
+num_warmup_trials = 10
+checkpoint_dir = "checkpoints_minimax_m27_h200"
+
+[kl]
+scale = 1.0
+token_count = 3
+target = 0.008
+prune_threshold = 2.0
+
+[detection]
+llm_judge = true
+llm_judge_model = "google/gemini-3.1-flash-lite-preview"
+llm_judge_batch_size = 10
+llm_judge_concurrency = 35
+
+[display]
+print_responses = false
+print_residual_geometry = false
+plot_residuals = false
+
+non_interactive = true
+
+[benign_prompts]
+dataset = "datasets/good_1000"
+split = "train[:400]"
+column = "prompt"
+
+[target_prompts]
+dataset = "datasets/harmful_1000"
+split = "train[:400]"
+column = "prompt"
+
+[benign_eval_prompts]
+dataset = "datasets/good_1000"
+split = "train[400:500]"
+column = "prompt"
+
+[target_eval_prompts]
+dataset = "datasets/harmful_1000"
+split = "train[400:500]"
+column = "prompt"

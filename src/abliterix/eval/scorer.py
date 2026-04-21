@@ -252,10 +252,14 @@ class TrialScorer:
         # the optimizer can learn a real KL-vs-refusals tradeoff curve.
         divergence_objective = kl_divergence / scale
 
-        # Penalise degenerate output lengths: if the mean response length drifts
-        # beyond 2 standard deviations, ramp up the divergence objective.
-        if length_deviation > 2.0:
-            divergence_objective *= 1.0 + 0.1 * (length_deviation - 2.0)
+        # Penalise degenerate output lengths.  KL on early generated tokens
+        # cannot see long-form drift (model collapses into "帮好帮好…" loops
+        # 50 tokens in but the prefix logprobs look fine).  Length deviation
+        # catches both shrinkage (model stops mid-sentence) and bloating
+        # (degenerate repetition extends responses to max_gen_tokens).
+        # Bumped from 0.1× threshold-only to additive 0.5× across all
+        # deviations — v3 fix for v2's metaphor-garbage Pareto.
+        divergence_objective += 0.5 * length_deviation
 
         return (divergence_objective, compliance_objective)
 
